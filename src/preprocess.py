@@ -3,16 +3,22 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from src.date_patterns import find_date_phrases
 from src.schemas import AnchorKind, TaskAnchor, TranscriptUtterance
 
 
 SPEAKER_RE = re.compile(r"^\s*(?P<speaker>[^:]{1,120}):\s*(?P<text>.*)\s*$")
 
 DONE_PATTERNS = [
-    r"\bвыполн",
-    r"\bготов[аыо]?\b",
-    r"\bутверд",
-    r"\bотправ",
+    r"\bвыполнен[аоы]?\b",
+    r"\bвыполнил[аи]?\b",
+    r"\bсделан[аоы]?\b",
+    r"\bсделали\b",
+    r"\bготов[аоы]?\b",
+    r"\bутвердил[аи]?\b",
+    r"\bутвержден[аоы]?\b",
+    r"\bутверждён[аоы]?\b",
+    r"\bотправил[аи]?\b",
     r"\bпередан",
     r"\bразработан",
     r"\bсмонтирован",
@@ -38,32 +44,39 @@ FAILED_PATTERNS = [
 
 TASK_INTENT_PATTERNS = [
     r"\bпод\s+протокол\b",
+    r"\bпротокол\b",
     r"\bзадач",
     r"\bнужно\b",
     r"\bнадо\b",
     r"\bдолжн",
+    r"\bответствен",
     r"\bпросьба\b",
     r"\bнаправьте\b",
+    r"\bназначить\b",
     r"\bназначим\b",
+    r"\bдоговорил[аи]сь\b",
+    r"\bдоговоримся\b",
     r"\bразошлем\b",
     r"\bразошлём\b",
     r"\bсформировать\b",
+    r"\bподготовка\b",
     r"\bподготовить\b",
+    r"\bподготовим\b",
+    r"\bподготовимся\b",
+    r"\bобсудим\b",
     r"\bпровести\b",
     r"\bнаправить\b",
     r"\bдоработать\b",
     r"\bсогласовать\b",
+    r"\bзапланируем\b",
+    r"\bвозьм[её]м\s+паузу\b",
+    r"\bбудем\b",
 ]
 
-DEADLINE_PATTERNS = [
-    r"\bпослезавтра\b",
-    r"\bзавтра\b",
-    r"\bчерез\s+(?:неделю|месяц)\b",
-    r"\b(?:в|во|к|до|на)\s+(?:понедельник|понедельника|вторник|вторника|среду|среды|четверг|четверга|пятницу|пятницы|субботу|субботы|воскресенье)\b",
-    r"\b(?:до|к|на)?\s*\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\b",
-    r"\b(?:до|к|на)\s+\d{1,2}\s+числа\b",
-    r"\b(?:к\s+)?концу недели\b",
-]
+LOW_COVERAGE_MIN_RATIO = 0.08
+LOW_COVERAGE_MIN_ANCHORS = 15
+LOW_COVERAGE_MIN_UTTERANCES = 30
+FALLBACK_TAIL_UTTERANCES = 70
 
 
 def load_transcript(path: Path) -> str:
@@ -114,11 +127,12 @@ def build_task_anchors(
     window_before: int = 0,
     window_after: int = 2,
 ) -> list[TaskAnchor]:
-    candidates: list[tuple[int, AnchorKind, tuple[str, ...], tuple[str, ...]]] = []
+    seeds: list[dict] = []
 
     for idx, utterance in enumerate(utterances):
         text = _norm(utterance.text)
         nearby_text = _nearby_text(utterances, idx, before=1, after=2)
+        wide_nearby_text = _nearby_text(utterances, idx, before=3, after=4)
         signals: list[str] = []
         kinds: set[AnchorKind] = set()
 
@@ -130,39 +144,46 @@ def build_task_anchors(
             kinds.add("failed")
 
         deadline_phrases = tuple(find_deadline_phrases(nearby_text))
+        wide_deadline_phrases = tuple(find_deadline_phrases(wide_nearby_text))
         has_task_intent = _matches_any(text, TASK_INTENT_PATTERNS)
         has_deadline_nearby = bool(deadline_phrases)
         if has_task_intent and has_deadline_nearby:
             signals.append("task_with_deadline")
             kinds.add("new")
 
+        has_date_first_signal = bool(find_deadline_phrases(text)) or _matches_any(
+            text,
+            [r"\bсрок\b", r"\bответствен"],
+        )
+        if has_date_first_signal and wide_deadline_phrases:
+            signals.append("date_first")
+            kinds.add("new")
+            deadline_phrases = tuple(_dedupe_keep_order(list(deadline_phrases) + list(wide_deadline_phrases)))
+
         if not kinds:
             continue
 
         kind = _resolve_kind(kinds)
-        candidates.append((idx, kind, tuple(sorted(set(signals))), deadline_phrases))
-
-    anchors: list[TaskAnchor] = []
-    seen_windows: set[tuple[int, int, str, AnchorKind]] = set()
-    for anchor_no, (idx, kind, signals, deadline_phrases) in enumerate(candidates, start=1):
-        start = max(0, idx - window_before)
-        end = min(len(utterances) - 1, idx + window_after)
-        window = tuple(utterances[start : end + 1])
-        key = (window[0].line_no, window[-1].line_no, utterances[idx].speaker, kind)
-        if key in seen_windows:
-            continue
-        seen_windows.add(key)
-        anchors.append(
-            TaskAnchor(
-                anchor_id=f"A{len(anchors) + 1:03d}",
+        before = 3 if "date_first" in signals else window_before
+        after = 4 if "date_first" in signals else window_after
+        seeds.append(
+            _make_seed(
+                utterances=utterances,
+                idx=idx,
                 kind=kind,
-                line_start=window[0].line_no,
-                line_end=window[-1].line_no,
-                speaker=utterances[idx].speaker,
-                utterances=window,
-                signals=signals,
+                signals=tuple(sorted(set(signals))),
                 deadline_phrases=deadline_phrases,
+                window_before=before,
+                window_after=after,
             )
+        )
+
+    anchors = _build_anchors_from_seeds(_merge_overlapping_seeds(seeds), utterances)
+    if _needs_low_coverage_fallback(anchors, utterances):
+        fallback_seeds = _build_tail_fallback_seeds(utterances)
+        anchors = _build_anchors_from_seeds(
+            _merge_overlapping_seeds(seeds + fallback_seeds),
+            utterances,
         )
 
     return anchors
@@ -173,20 +194,125 @@ def format_anchors_for_prompt(anchors: list[TaskAnchor]) -> str:
 
 
 def find_deadline_phrases(text: str) -> list[str]:
-    normalized = _norm(text)
-    phrases: list[str] = []
-    for pattern in DEADLINE_PATTERNS:
-        phrases.extend(match.group(0).strip() for match in re.finditer(pattern, normalized))
-    return _dedupe_keep_order(phrases)
+    return find_date_phrases(text)
 
 
 def normalize_space(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
+def _make_seed(
+    utterances: list[TranscriptUtterance],
+    idx: int,
+    kind: AnchorKind,
+    signals: tuple[str, ...],
+    deadline_phrases: tuple[str, ...],
+    window_before: int,
+    window_after: int,
+) -> dict:
+    start = max(0, idx - window_before)
+    end = min(len(utterances) - 1, idx + window_after)
+    return {
+        "start": start,
+        "end": end,
+        "kind": kind,
+        "speakers": (utterances[idx].speaker,),
+        "signals": signals,
+        "deadline_phrases": deadline_phrases,
+    }
+
+
+def _merge_overlapping_seeds(seeds: list[dict]) -> list[dict]:
+    if not seeds:
+        return []
+
+    sorted_seeds = sorted(seeds, key=lambda seed: (seed["start"], seed["end"]))
+    merged = [sorted_seeds[0].copy()]
+    for seed in sorted_seeds[1:]:
+        current = merged[-1]
+        if seed["start"] <= current["end"] + 1:
+            current["end"] = max(current["end"], seed["end"])
+            current["kind"] = _merge_kind(current["kind"], seed["kind"])
+            current["signals"] = tuple(
+                sorted(set(current["signals"]) | set(seed["signals"]))
+            )
+            current["speakers"] = tuple(
+                _dedupe_keep_order(list(current["speakers"]) + list(seed["speakers"]))
+            )
+            current["deadline_phrases"] = tuple(
+                _dedupe_keep_order(
+                    list(current["deadline_phrases"]) + list(seed["deadline_phrases"])
+                )
+            )
+            continue
+        merged.append(seed.copy())
+
+    return merged
+
+
+def _build_anchors_from_seeds(
+    seeds: list[dict],
+    utterances: list[TranscriptUtterance],
+) -> list[TaskAnchor]:
+    anchors: list[TaskAnchor] = []
+    for seed in seeds:
+        window = tuple(utterances[seed["start"] : seed["end"] + 1])
+        speakers = seed["speakers"]
+        speaker = speakers[0] if len(speakers) == 1 else "Несколько спикеров"
+        anchors.append(
+            TaskAnchor(
+                anchor_id=f"A{len(anchors) + 1:03d}",
+                kind=seed["kind"],
+                line_start=window[0].line_no,
+                line_end=window[-1].line_no,
+                speaker=speaker,
+                utterances=window,
+                signals=seed["signals"],
+                deadline_phrases=seed["deadline_phrases"],
+            )
+        )
+
+    return anchors
+
+
+def _needs_low_coverage_fallback(
+    anchors: list[TaskAnchor],
+    utterances: list[TranscriptUtterance],
+) -> bool:
+    if len(utterances) < LOW_COVERAGE_MIN_UTTERANCES:
+        return False
+    anchored_lines = {utterance.line_no for anchor in anchors for utterance in anchor.utterances}
+    coverage = len(anchored_lines) / len(utterances)
+    return len(anchors) < LOW_COVERAGE_MIN_ANCHORS or coverage < LOW_COVERAGE_MIN_RATIO
+
+
+def _build_tail_fallback_seeds(utterances: list[TranscriptUtterance]) -> list[dict]:
+    if not utterances:
+        return []
+
+    start = max(0, len(utterances) - FALLBACK_TAIL_UTTERANCES)
+    chunk_text = " ".join(utterance.text for utterance in utterances[start:])
+    return [
+        {
+            "start": start,
+            "end": len(utterances) - 1,
+            "kind": "mixed",
+            "speakers": ("Несколько спикеров",),
+            "signals": ("final_tail_fallback",),
+            "deadline_phrases": tuple(find_deadline_phrases(chunk_text)),
+        }
+    ]
+
+
 def _resolve_kind(kinds: set[AnchorKind]) -> AnchorKind:
     if len(kinds) == 1:
         return next(iter(kinds))
+    return "mixed"
+
+
+def _merge_kind(left: AnchorKind, right: AnchorKind) -> AnchorKind:
+    if left == right:
+        return left
     return "mixed"
 
 

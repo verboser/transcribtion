@@ -71,6 +71,7 @@ LLM-слой.
 transcript.txt
 -> парсинг реплик speaker + text
 -> построение детерминированных anchors вокруг задач, статусов и сроков
+-> final-tail fallback при подозрительно низком покрытии anchors
 -> отправка в LLM только anchor-блоков
 -> strict JSON Schema
 -> обязательная привязка каждой задачи к anchor_ids
@@ -107,9 +108,9 @@ LLM используется только там, где нужна семант
 
 | Файл | Реплик всего | Anchor-блоков | Уникальных реплик в anchors | Сокращение входа |
 | --- | ---: | ---: | ---: | ---: |
-| `transcript.txt` | 459 | 48 | 121 | 73.6% |
-| `transcript2.txt` | 614 | 7 | 21 | 96.6% |
-| `transcript3.txt` | 355 | 21 | 61 | 82.8% |
+| `transcript.txt` | 459 | 19 | 217 | 52.7% |
+| `transcript2.txt` | 614 | 9 | 115 | 81.3% |
+| `transcript3.txt` | 355 | 22 | 115 | 67.6% |
 
 Метрики качества и стабильности считаются при запуске:
 
@@ -124,7 +125,11 @@ python main.py --all --runs 5
 - количество задач в блоке `Новые`;
 - общее количество задач;
 - признак стабильности по количеству;
-- список прогонов, которые отличаются от первого.
+- список прогонов, которые отличаются от первого;
+- Jaccard-сходство сигнатур задач относительно `run_1`;
+- количество задач, появившихся только в одном прогоне;
+- средние значения `raw`, `valid`, `final`, `filtered`, `dedup_removed`
+  после postprocess.
 
 Эти значения не зашиты в README, потому что зависят от модели, промпта и
 текущего API-ответа. В сдачу лучше прикладывать фактический вывод последнего
@@ -136,6 +141,7 @@ python main.py --all --runs 5
 main.py                  CLI-точка входа
 requirements.txt         зависимости
 src/config.py            настройки окружения
+src/date_patterns.py     общие regex-паттерны дат для preprocess и normalizer
 src/preprocess.py        парсинг транскрипта и построение anchors
 src/schemas.py           контракты данных и strict JSON Schema
 src/llm_client.py        клиент OpenAI Responses API
@@ -150,5 +156,5 @@ trascripts/              входные транскрипты из задани
 ## Проверки
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider
 ```
