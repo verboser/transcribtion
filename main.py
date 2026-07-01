@@ -5,8 +5,11 @@ from pathlib import Path
 
 from src.config import Settings
 from src.date_normalizer import print_replacement_table
-from src.llm_client import OpenAITaskExtractor
-from src.postprocess import build_dataframe
+from src.llm_client import (
+    DEFAULT_ANCHOR_GROUP_OVERLAP,
+    DEFAULT_ANCHOR_GROUP_SIZE,
+    OpenAITaskExtractor,
+)
 from src.sqlite_store import save_tasks
 from src.stability import run_stability_check
 
@@ -20,31 +23,59 @@ MEETING_DATES = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Extract action items from meeting transcripts."
+        description="Извлечь задачи из транскриптов встреч."
     )
     parser.add_argument(
         "--transcript",
         type=Path,
         default=Path("trascripts/transcript.txt"),
-        help="Path to one transcript file.",
+        help="Путь к одному файлу транскрипта.",
     )
     parser.add_argument(
         "--all",
         action="store_true",
-        help="Run all assignment transcripts from the trascripts directory.",
+        help="Обработать все транскрипты из директории trascripts.",
     )
     parser.add_argument(
         "--runs",
         type=int,
         default=5,
-        help="Number of extraction runs for stability check.",
+        help="Количество прогонов извлечения для проверки стабильности.",
+    )
+    parser.add_argument(
+        "--strategy",
+        choices=["grouped", "global"],
+        default="grouped",
+        help=(
+            "Стратегия LLM-извлечения: grouped отправляет компактные группы "
+            "anchors, global отправляет все anchors одним запросом."
+        ),
+    )
+    parser.add_argument(
+        "--anchor-group-size",
+        type=int,
+        default=DEFAULT_ANCHOR_GROUP_SIZE,
+        help="Количество anchors в одном LLM-запросе для --strategy grouped.",
+    )
+    parser.add_argument(
+        "--anchor-group-overlap",
+        type=int,
+        default=DEFAULT_ANCHOR_GROUP_OVERLAP,
+        help="Перекрытие соседних групп anchors для --strategy grouped.",
     )
     parser.add_argument(
         "--save-sqlite",
         action="store_true",
-        help="Optionally save the final run result to SQLite.",
+        help="Дополнительно сохранить финальный результат в SQLite.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.runs < 1:
+        parser.error("--runs должен быть не меньше 1.")
+    if args.anchor_group_size < 1:
+        parser.error("--anchor-group-size должен быть не меньше 1.")
+    if args.anchor_group_overlap < 0:
+        parser.error("--anchor-group-overlap должен быть не меньше 0.")
+    return args
 
 
 def resolve_inputs(args: argparse.Namespace) -> list[Path]:
@@ -56,7 +87,12 @@ def resolve_inputs(args: argparse.Namespace) -> list[Path]:
 def main() -> None:
     args = parse_args()
     settings = Settings.from_env()
-    extractor = OpenAITaskExtractor(settings)
+    extractor = OpenAITaskExtractor(
+        settings,
+        strategy=args.strategy,
+        anchor_group_size=args.anchor_group_size,
+        anchor_group_overlap=args.anchor_group_overlap,
+    )
 
     for transcript_path in resolve_inputs(args):
         meeting_date = MEETING_DATES.get(transcript_path.name)
@@ -77,13 +113,16 @@ def main() -> None:
             extractor=extractor.extract,
         )
 
-        final_result = results.extractions[-1]
-        df, replacements = build_dataframe(
-            final_result.tasks,
-            meeting_date,
-            final_result.anchors,
+        selected_run_idx = (
+            results.selected_run_idx
+            if results.selected_run_idx is not None
+            else len(results.extractions) - 1
         )
+        df = results.final_df
+        replacements = results.final_replacements
 
+        print(f"\nВыбран финальный прогон: run_{selected_run_idx + 1}")
+        print(f"Источник финальной таблицы: {results.final_source}")
         print("\nИтоговый DataFrame:")
         print(df.to_string(index=False))
 

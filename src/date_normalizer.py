@@ -69,9 +69,10 @@ def normalize_deadline(
     deadline_raw: str,
     evidence: str,
     meeting_date: str,
+    task_text: str = "",
 ) -> tuple[str, DateReplacement | None]:
     base = date.fromisoformat(meeting_date)
-    sources = _deadline_sources(deadline_raw, evidence)
+    sources = _deadline_sources(deadline_raw, evidence, task_text)
     for source in sources:
         normalized = _normalize_phrase(source, base)
         if normalized:
@@ -99,15 +100,15 @@ def _normalize_phrase(phrase: str, base: date) -> str:
     text = phrase.lower().replace("ё", "е")
     text = re.sub(r"\s+", " ", text).strip(" .,:;")
 
-    if "сегодня" in text:
+    if re.search(r"\bсегодня\b", text):
         return base.isoformat()
-    if "послезавтра" in text:
+    if re.search(r"\bпослезавтра\b", text):
         return (base + timedelta(days=2)).isoformat()
-    if "завтра" in text:
+    if re.search(r"\bзавтра\b", text):
         return (base + timedelta(days=1)).isoformat()
-    if "через месяц" in text:
+    if re.search(r"\bчерез\s+месяц\b", text):
         return (base + relativedelta(months=1)).isoformat()
-    if "через неделю" in text:
+    if re.search(r"\bчерез\s+неделю\b", text):
         return (base + timedelta(days=7)).isoformat()
 
     next_week_phrase = re.search(
@@ -169,18 +170,89 @@ def _normalize_phrase(phrase: str, base: date) -> str:
     return ""
 
 
-def _find_date_phrase(text: str) -> str:
+def _find_relevant_date_phrase(text: str, task_text: str) -> str:
     phrases = find_date_phrases(text)
-    return phrases[0] if phrases else ""
+    if not phrases:
+        return ""
+    if not task_text or len(phrases) == 1:
+        return phrases[0]
+
+    task_terms = _date_selection_terms(task_text)
+    scored_phrases = [
+        (_date_phrase_score(text, phrase, task_terms), -idx, phrase)
+        for idx, phrase in enumerate(phrases)
+    ]
+    best_score, _, best_phrase = max(scored_phrases)
+    return best_phrase if best_score > 0 else phrases[0]
 
 
-def _deadline_sources(deadline_raw: str, evidence: str) -> list[str]:
-    sources = [_clean_source(deadline_raw), _find_date_phrase(evidence)]
+def _deadline_sources(deadline_raw: str, evidence: str, task_text: str) -> list[str]:
+    evidence_source = _find_relevant_date_phrase(evidence, task_text)
+    sources = [_clean_source(deadline_raw), evidence_source]
     return [source for source in _dedupe_keep_order(sources) if source]
 
 
 def _clean_source(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip(" .,:;")
+
+
+def _date_selection_terms(value: str) -> list[str]:
+    text = value.lower().replace("ё", "е")
+    return [
+        term
+        for term in re.findall(r"[а-яa-z0-9]+", text)
+        if len(term) >= 4 and not term.isdigit()
+    ]
+
+
+def _date_phrase_score(text: str, phrase: str, task_terms: list[str]) -> int:
+    match = re.search(re.escape(phrase), text.lower().replace("ё", "е"))
+    if not match:
+        return 0
+
+    clause = _clause_around_span(text, match.start(), match.end())
+    clause_terms = _date_selection_terms(clause)
+    clause_score = _term_overlap_score(task_terms, clause_terms)
+    if clause_score:
+        return clause_score * 10
+
+    window_start = max(0, match.start() - 80)
+    window_end = min(len(text), match.end() + 80)
+    window_terms = _date_selection_terms(text[window_start:window_end])
+    return _term_overlap_score(task_terms, window_terms)
+
+
+def _clause_around_span(text: str, start: int, end: int) -> str:
+    left_candidates = [
+        text.rfind(separator, 0, start)
+        for separator in [".", "!", "?", ";", ",", "\n"]
+    ]
+    left = max(left_candidates)
+    right_candidates = [
+        idx for idx in (
+            text.find(separator, end)
+            for separator in [".", "!", "?", ";", ",", "\n"]
+        )
+        if idx != -1
+    ]
+    right = min(right_candidates) if right_candidates else len(text)
+    return text[left + 1 : right]
+
+
+def _term_overlap_score(left_terms: list[str], right_terms: list[str]) -> int:
+    return sum(
+        1
+        for left_term in left_terms
+        if any(_same_term_family(left_term, right_term) for right_term in right_terms)
+    )
+
+
+def _same_term_family(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    if len(left) >= 4 and len(right) >= 4:
+        return left[:4] == right[:4]
+    return False
 
 
 def _next_weekday_after(base: date, weekday: int) -> date:

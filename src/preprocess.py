@@ -5,42 +5,10 @@ from pathlib import Path
 
 from src.date_patterns import find_date_phrases
 from src.schemas import AnchorKind, TaskAnchor, TranscriptUtterance
+from src.status_patterns import detect_status_signals
 
 
 SPEAKER_RE = re.compile(r"^\s*(?P<speaker>[^:]{1,120}):\s*(?P<text>.*)\s*$")
-
-DONE_PATTERNS = [
-    r"\bвыполнен[аоы]?\b",
-    r"\bвыполнил[аи]?\b",
-    r"\bсделан[аоы]?\b",
-    r"\bсделали\b",
-    r"\bготов[аоы]?\b",
-    r"\bутвердил[аи]?\b",
-    r"\bутвержден[аоы]?\b",
-    r"\bутверждён[аоы]?\b",
-    r"\bотправил[аи]?\b",
-    r"\bпередан",
-    r"\bразработан",
-    r"\bсмонтирован",
-    r"\bпротестирован",
-    r"\bзалил[аи]?\b",
-    r"\bсогласовал",
-    r"\bподготовил",
-    r"\bзакрыт",
-]
-
-FAILED_PATTERNS = [
-    r"\bне\s+успел[аи]?\b",
-    r"\bне\s+успели\b",
-    r"\bне\s+сделал[аи]?\b",
-    r"\bне\s+сделали\b",
-    r"\bне\s+выполн",
-    r"\bне\s+готов",
-    r"\bне\s+утверж",
-    r"\bне\s+подготов",
-    r"\bпросроч",
-    r"\bсрок\s+прош",
-]
 
 TASK_INTENT_PATTERNS = [
     r"\bпод\s+протокол\b",
@@ -136,10 +104,11 @@ def build_task_anchors(
         signals: list[str] = []
         kinds: set[AnchorKind] = set()
 
-        if _matches_any(text, DONE_PATTERNS):
+        has_done_status, has_failed_status = detect_status_signals(text)
+        if has_done_status:
             signals.append("done_signal")
             kinds.add("done")
-        if _matches_any(text, FAILED_PATTERNS):
+        if has_failed_status:
             signals.append("failed_signal")
             kinds.add("failed")
 
@@ -164,8 +133,7 @@ def build_task_anchors(
             continue
 
         kind = _resolve_kind(kinds)
-        before = 3 if "date_first" in signals else window_before
-        after = 4 if "date_first" in signals else window_after
+        before, after = _seed_window(signals, window_before, window_after)
         seeds.append(
             _make_seed(
                 utterances=utterances,
@@ -187,6 +155,20 @@ def build_task_anchors(
         )
 
     return anchors
+
+
+def _seed_window(
+    signals: list[str],
+    default_before: int,
+    default_after: int,
+) -> tuple[int, int]:
+    if "done_signal" in signals or "failed_signal" in signals:
+        return 0, 0
+    if "date_first" in signals:
+        return 3, 4
+    if "task_with_deadline" in signals:
+        return default_before, default_after
+    return 0, 0
 
 
 def format_anchors_for_prompt(anchors: list[TaskAnchor]) -> str:

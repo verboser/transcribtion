@@ -33,6 +33,14 @@ def test_today() -> None:
     assert value == "2026-04-13"
 
 
+def test_short_relative_words_do_not_match_inside_adjectives() -> None:
+    for phrase in ["сегодняшний статус", "завтрашний созвон", "послезавтрашний план"]:
+        value, replacement = normalize_deadline(phrase, "", "2026-04-13")
+
+        assert value == ""
+        assert replacement is None
+
+
 def test_end_of_month() -> None:
     value, _ = normalize_deadline("к концу месяца", "", "2026-04-13")
 
@@ -41,6 +49,12 @@ def test_end_of_month() -> None:
 
 def test_end_of_week_forms() -> None:
     value, _ = normalize_deadline("в конце недели", "", "2026-04-13")
+
+    assert value == "2026-04-17"
+
+
+def test_end_of_this_week_form() -> None:
+    value, _ = normalize_deadline("до конца этой недели", "", "2026-04-13")
 
     assert value == "2026-04-17"
 
@@ -86,3 +100,32 @@ def test_next_weekday_dative_form() -> None:
     value, _ = normalize_deadline("к следующей пятнице", "", "2026-04-13")
 
     assert value == "2026-04-17"
+
+
+def test_selects_date_related_to_task_text() -> None:
+    value, replacement = normalize_deadline(
+        deadline_raw="",
+        evidence=(
+            "Рузвельт: завтра запланировано совещание, "
+            "мы обсудим и подготовимся к среде."
+        ),
+        meeting_date="2026-04-15",
+        task_text="Подготовиться к среде",
+    )
+
+    assert value == "2026-04-22"
+    assert replacement is not None
+    assert replacement.source == "к среде"
+
+
+def test_selects_date_from_clause_related_to_task_text() -> None:
+    value, replacement = normalize_deadline(
+        deadline_raw="",
+        evidence="Иван: завтра совещание, подготовить отчет до пятницы.",
+        meeting_date="2026-04-13",
+        task_text="Подготовить отчет",
+    )
+
+    assert value == "2026-04-17"
+    assert replacement is not None
+    assert replacement.source == "до пятницы"

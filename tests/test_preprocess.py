@@ -61,6 +61,50 @@ def test_build_task_anchors_for_done_signal() -> None:
     assert anchors[0].kind == "done"
 
 
+def test_done_anchor_does_not_match_close_infinitive() -> None:
+    utterances = parse_transcript("Иван: не можем очень долго закрыть заказы")
+
+    anchors = build_task_anchors(utterances)
+
+    assert anchors == []
+
+
+def test_negated_done_phrase_creates_only_failed_anchor() -> None:
+    utterances = parse_transcript("Иван: отчет не сделали")
+
+    anchors = build_task_anchors(utterances)
+
+    assert len(anchors) == 1
+    assert anchors[0].kind == "failed"
+    assert anchors[0].signals == ("failed_signal",)
+
+
+def test_status_detection_handles_failed_and_done_in_different_clauses() -> None:
+    utterances = parse_transcript(
+        "Иван: автоматический запуск не успел сделать, "
+        "но подготовительные работы произвёл"
+    )
+
+    anchors = build_task_anchors(utterances)
+
+    assert len(anchors) == 1
+    assert anchors[0].kind == "mixed"
+    assert anchors[0].signals == ("done_signal", "failed_signal")
+
+
+def test_done_anchor_does_not_pull_neighboring_context() -> None:
+    utterances = parse_transcript(
+        "Иван: электрические схемы разработаны\n"
+        "Мария: осталось провести обследование"
+    )
+
+    anchors = build_task_anchors(utterances)
+
+    assert len(anchors) == 1
+    assert anchors[0].line_start == 1
+    assert anchors[0].line_end == 1
+
+
 def test_date_first_anchor_without_task_keyword() -> None:
     utterances = parse_transcript(
         "Иван: мы возьмем небольшую паузу\n"
