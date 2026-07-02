@@ -724,6 +724,8 @@ def _find_duplicate_row_idx(
     for idx, existing in enumerate(unique):
         if not _same_row_group(existing, row):
             continue
+        if _same_generic_done_evidence(existing, row):
+            return idx
         if _task_similarity(existing["Задача"], row["Задача"]) >= 0.88:
             return idx
     return None
@@ -735,6 +737,23 @@ def _same_row_group(left: dict[str, str], right: dict[str, str]) -> bool:
         and _normalize_key(left["Ответственный"]) == _normalize_key(right["Ответственный"])
         and left["Срок"] == right["Срок"]
     )
+
+
+def _same_generic_done_evidence(left: dict[str, str], right: dict[str, str]) -> bool:
+    return (
+        left["Блок"] == "Выполненные"
+        and _is_all_done_summary(left["Задача"])
+        and _is_all_done_summary(right["Задача"])
+        and bool(_evidence_refs(left["Обоснование"]) & _evidence_refs(right["Обоснование"]))
+    )
+
+
+def _is_all_done_summary(task_text: str) -> bool:
+    return bool(re.search(r"\bвсе\b.+\bвыполн", _normalize_key(task_text)))
+
+
+def _evidence_refs(evidence: str) -> set[str]:
+    return set(re.findall(r"\[(\d{1,5})\]", evidence))
 
 
 def _merge_duplicate_rows(

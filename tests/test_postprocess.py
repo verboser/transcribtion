@@ -797,6 +797,56 @@ def test_done_task_requires_concrete_work_object() -> None:
     assert df.empty
 
 
+def test_done_rejects_negative_passive_status_clause() -> None:
+    task = ExtractedTask(
+        block="Выполненные",
+        task="гидроцилиндры ещё не были изготовлены и смонтированы",
+        responsible="Черчилль",
+        deadline_raw="",
+        evidence=(
+            "Черчилль: По подготовленным, но гидроцилиндры ещё не были "
+            "изготовлены и смонтированы в эту остановку производства."
+        ),
+        anchor_ids=(),
+    )
+
+    df, _ = build_dataframe([task], "2026-04-15")
+
+    assert df.empty
+
+
+def test_done_generic_all_done_rows_from_same_evidence_are_merged() -> None:
+    tasks = [
+        ExtractedTask(
+            block="Выполненные",
+            task="все цели выполнены",
+            responsible="Иванова Ольга",
+            deadline_raw="",
+            evidence=(
+                "[0178] Иванова Ольга: по целям все цели выполнены, "
+                "по поводу п к его все мероприятия выполнены"
+            ),
+            anchor_ids=(),
+        ),
+        ExtractedTask(
+            block="Выполненные",
+            task="все мероприятия выполнены",
+            responsible="Иванова Ольга",
+            deadline_raw="",
+            evidence=(
+                "[0178] Иванова Ольга: по целям все цели выполнены, "
+                "по поводу п к его все мероприятия выполнены"
+            ),
+            anchor_ids=(),
+        ),
+    ]
+
+    df, _, stats = build_dataframe_with_stats(tasks, "2026-04-13")
+
+    assert len(df) == 1
+    assert stats.dedup_removed_rows == 1
+
+
 def test_responsible_drops_organization_tail_tokens() -> None:
     anchor = TaskAnchor(
         anchor_id="A001",
