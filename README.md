@@ -223,8 +223,6 @@ trascripts/                входные транскрипты
 ## Проверки
 
 ```bash
-.venv/bin/python -m pytest -q
-.venv/bin/python -m compileall -q .
 git diff --check
 ```
 
