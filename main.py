@@ -232,7 +232,11 @@ def main() -> None:
         print(f"\nВыбран финальный прогон: run_{selected_run_idx + 1}")
         print(f"Источник финальной таблицы: {results.final_source}")
         print("\nИтоговый DataFrame:")
-        print(df.to_string(index=False))
+        try:
+            import tabulate
+            print(df.to_markdown(index=False, tablefmt="grid"))
+        except ImportError:
+            print(df.to_string(index=False))
 
         print_replacement_table(replacements)
 
