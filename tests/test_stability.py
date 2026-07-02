@@ -1,6 +1,12 @@
 from pathlib import Path
 
-from src.schemas import ExtractedTask, ExtractionResult, TaskAnchor, TranscriptUtterance
+from src.schemas import (
+    DATAFRAME_COLUMNS,
+    ExtractedTask,
+    ExtractionResult,
+    TaskAnchor,
+    TranscriptUtterance,
+)
 from src.stability import run_stability_check
 
 
@@ -36,12 +42,18 @@ def test_stability_selects_centroid_run_not_last() -> None:
     assert "Финальный прогон по centroid: run_2" in report.report_lines
 
 
-def test_stability_final_dataframe_uses_consensus_support() -> None:
+def test_stability_final_dataframe_uses_90_percent_consensus_support() -> None:
     run_results = [
         _result(
             [
                 _done("Отчет выполнен", "Иван: отчет выполнен."),
-                _done("Лишняя задача выполнена", "Иван: лишняя задача выполнена."),
+                _done("Схемы разработаны", "Иван: схемы разработаны."),
+            ]
+        ),
+        _result(
+            [
+                _done("Отчет выполнен", "Иван: отчет выполнен."),
+                _done("Схемы разработаны", "Иван: схемы разработаны."),
             ]
         ),
         _result(
@@ -56,6 +68,7 @@ def test_stability_final_dataframe_uses_consensus_support() -> None:
                 _done("Схемы разработаны", "Иван: схемы разработаны."),
             ]
         ),
+        _result([_done("Отчет выполнен", "Иван: отчет выполнен.")]),
     ]
 
     def extractor(_path: Path, _meeting_date: str) -> ExtractionResult:
@@ -64,18 +77,27 @@ def test_stability_final_dataframe_uses_consensus_support() -> None:
     report = run_stability_check(
         transcript_path=Path("trascripts/transcript.txt"),
         meeting_date="2026-04-13",
-        runs=3,
+        runs=5,
         extractor=extractor,
     )
 
-    assert set(report.final_df["Задача"]) == {"Отчет выполнен", "Схемы разработаны"}
-    assert report.final_source == "consensus support>=2"
+    assert set(report.final_df["Задача"]) == {"Отчет выполнен"}
+    assert list(report.final_df.columns) == DATAFRAME_COLUMNS
+    assert "support_count" not in report.final_df.columns
+    assert "verification_status" not in report.final_df.columns
+    assert report.final_source == "consensus support>=5 (90%)"
+    assert report.support_threshold == 5
+    assert report.final_task_support[0].support_count == 5
+    assert not report.stability_passed
 
 
 def test_stability_consensus_groups_fuzzy_task_variants() -> None:
     run_results = [
         _result([_done("Отчет выполнен", "Иван: отчет выполнен.")]),
         _result([_done("Выполнен отчет", "Иван: отчет выполнен.")]),
+        _result([_done("Отчет выполнен", "Иван: отчет выполнен.")]),
+        _result([_done("Выполнен отчет", "Иван: отчет выполнен.")]),
+        _result([_done("Отчет выполнен", "Иван: отчет выполнен.")]),
     ]
 
     def extractor(_path: Path, _meeting_date: str) -> ExtractionResult:
@@ -84,12 +106,97 @@ def test_stability_consensus_groups_fuzzy_task_variants() -> None:
     report = run_stability_check(
         transcript_path=Path("trascripts/transcript.txt"),
         meeting_date="2026-04-13",
-        runs=2,
+        runs=5,
         extractor=extractor,
     )
 
     assert len(report.final_df) == 1
-    assert report.final_source == "consensus support>=2"
+    assert report.final_source == "consensus support>=5 (90%)"
+    assert report.stability_passed
+
+
+def test_stability_verified_consensus_can_include_near_consensus_candidate() -> None:
+    run_results = [
+        _result(
+            [
+                _done("Отчет выполнен", "Иван: отчет выполнен."),
+                _done("Схемы разработаны", "Иван: схемы разработаны."),
+            ]
+        ),
+        _result(
+            [
+                _done("Отчет выполнен", "Иван: отчет выполнен."),
+                _done("Схемы разработаны", "Иван: схемы разработаны."),
+            ]
+        ),
+        _result(
+            [
+                _done("Отчет выполнен", "Иван: отчет выполнен."),
+                _done("Схемы разработаны", "Иван: схемы разработаны."),
+            ]
+        ),
+        _result(
+            [
+                _done("Отчет выполнен", "Иван: отчет выполнен."),
+                _done("Схемы разработаны", "Иван: схемы разработаны."),
+            ]
+        ),
+        _result([_done("Отчет выполнен", "Иван: отчет выполнен.")]),
+    ]
+
+    def extractor(_path: Path, _meeting_date: str) -> ExtractionResult:
+        return run_results.pop(0)
+
+    def verifier(candidates, _meeting_date: str) -> set[str]:
+        return {
+            candidate.candidate_id
+            for candidate in candidates
+            if candidate.task == "Схемы разработаны"
+        }
+
+    report = run_stability_check(
+        transcript_path=Path("trascripts/transcript.txt"),
+        meeting_date="2026-04-13",
+        runs=5,
+        extractor=extractor,
+        verifier=verifier,
+    )
+
+    assert set(report.final_df["Задача"]) == {"Отчет выполнен", "Схемы разработаны"}
+    assert report.verified_candidate_count == 1
+    assert report.verifier_candidate_count == 1
+    support_by_task = {
+        support.task: support
+        for support in report.final_task_support
+    }
+    assert support_by_task["Отчет выполнен"].verification_status == "raw_consensus"
+    assert support_by_task["Схемы разработаны"].verification_status == "verified_consensus"
+    assert support_by_task["Схемы разработаны"].support_count == 4
+
+
+def test_stability_rejected_near_consensus_candidate_stays_out_of_final() -> None:
+    run_results = [
+        _result([_done("Отчет выполнен", "Иван: отчет выполнен.")]),
+        _result([_done("Отчет выполнен", "Иван: отчет выполнен.")]),
+        _result([_done("Отчет выполнен", "Иван: отчет выполнен.")]),
+        _result([_done("Отчет выполнен", "Иван: отчет выполнен.")]),
+        _result([]),
+    ]
+
+    def extractor(_path: Path, _meeting_date: str) -> ExtractionResult:
+        return run_results.pop(0)
+
+    report = run_stability_check(
+        transcript_path=Path("trascripts/transcript.txt"),
+        meeting_date="2026-04-13",
+        runs=5,
+        extractor=extractor,
+        verifier=lambda _candidates, _meeting_date: set(),
+    )
+
+    assert report.final_df.empty
+    assert report.verifier_candidate_count == 1
+    assert report.verified_candidate_count == 0
 
 
 def _done(task: str, evidence: str) -> ExtractedTask:

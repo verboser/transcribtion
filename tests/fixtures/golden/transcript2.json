@@ -1,0 +1,38 @@
+{
+  "transcript": "transcript2.txt",
+  "meeting_date": "2026-04-29",
+  "tasks": [
+    {
+      "id": "t2_failed_0012",
+      "block": "Невыполненные",
+      "task": "Не успели по плану до 2 числа",
+      "responsible": "Человек 3",
+      "deadline": "2026-05-02",
+      "evidence_contains": ["по плану до 2 числа", "не успели"]
+    },
+    {
+      "id": "t2_new_0050",
+      "block": "Новые",
+      "task": "Через неделю собраться и еще раз обсудить",
+      "responsible": "Человек 7",
+      "deadline": "2026-05-06",
+      "evidence_contains": ["Через неделю", "собраться и ещё раз обсудить"]
+    },
+    {
+      "id": "t2_failed_0281",
+      "block": "Невыполненные",
+      "task": "Пока так не сделал",
+      "responsible": "Человек 4",
+      "deadline": "",
+      "evidence_contains": ["пока так", "не сделал"]
+    },
+    {
+      "id": "t2_done_0358",
+      "block": "Выполненные",
+      "task": "Подготовили 2 вариант",
+      "responsible": "Человек 7",
+      "deadline": "",
+      "evidence_contains": ["подготовили 2 вариант"]
+    }
+  ]
+}

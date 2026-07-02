@@ -62,12 +62,31 @@ RESPONSIBLE_STOP_WORDS = {
     "ноября",
     "декабря",
 }
-RESPONSIBLE_ORG_WORDS = {
+RESPONSIBLE_ORG_TAIL_WORDS = {
     "м",
     "п",
-    "югра",
-    "урал",
-    "парус",
+    "мп",
+    "ооо",
+    "ао",
+    "зао",
+    "пао",
+    "ип",
+    "ано",
+    "нко",
+    "фгуп",
+    "муп",
+}
+RESPONSIBLE_ORG_CONTEXT_WORDS = {
+    "компания",
+    "организация",
+    "общество",
+    "филиал",
+    "департамент",
+    "отдел",
+    "служба",
+    "управление",
+    "завод",
+    "цех",
 }
 RESPONSIBLE_CONNECTOR_WORDS = {
     "будет",
@@ -146,8 +165,39 @@ WEAK_DONE_OBJECT_TERMS = {
     "задачу",
     "написано",
     "сделано",
+    "подготовительные",
+    "работы",
+}
+GENERIC_ALL_DONE_OBJECT_TERMS = {
+    "цели",
+    "задачи",
+    "работы",
+    "вопросы",
+    "пункты",
 }
 ONGOING_NEW_PATTERNS = ONGOING_STATE_PATTERNS
+NEW_PLANNING_DEADLINE_PATTERNS = [
+    r"\bкакой\s+срок\b",
+    r"\bсрок\s+общий\b",
+    r"\bсрок\b.+\bобсудим\b",
+]
+NEW_ACTION_PATTERNS = [
+    r"\bсформировать\b",
+    r"\bподготов",
+    r"\bсобрать\b",
+    r"\bпровести\b",
+    r"\bсогласовать\b",
+    r"\bдоработать\b",
+    r"\bнаправить\b",
+    r"\bначать\b",
+    r"\bсобраться\b",
+    r"\bутвердить\b",
+]
+DONE_EVIDENCE_REJECTION_PATTERNS = [
+    r"\bпосмотрю\b.+\bразработан",
+    r"\bутвердил[аи]?\b.+\bжд[её]м\b",
+    r"\bкак\s+я\s+понимаю\b.+\bзадач\w*\b.+\bвыполнил",
+]
 
 
 @dataclass(frozen=True)
@@ -434,12 +484,14 @@ def _format_person_name(value: str) -> str:
         if (
             token in RESPONSIBLE_STOP_WORDS
             or token in RESPONSIBLE_SCOPE_WORDS
-            or token in RESPONSIBLE_ORG_WORDS
+            or _is_responsible_org_tail(token, has_name=bool(tokens))
         ):
             break
         if token in RESPONSIBLE_CONNECTOR_WORDS or token in RESPONSIBLE_TASK_WORDS:
             continue
         if len(token) < 3:
+            if tokens:
+                break
             continue
         tokens.append(token)
         if len(tokens) == 3:
@@ -456,9 +508,16 @@ def _looks_like_person_name(value: str) -> bool:
     if not tokens:
         return False
     return all(
-        token not in RESPONSIBLE_TASK_WORDS and token not in RESPONSIBLE_ORG_WORDS
+        token not in RESPONSIBLE_TASK_WORDS
+        and not _is_responsible_org_tail(token, has_name=True)
         for token in tokens
     )
+
+
+def _is_responsible_org_tail(token: str, has_name: bool) -> bool:
+    if token in RESPONSIBLE_ORG_CONTEXT_WORDS:
+        return True
+    return token in RESPONSIBLE_ORG_TAIL_WORDS and has_name
 
 
 def _word_tokens(value: str) -> list[str]:
@@ -478,6 +537,8 @@ def _has_explicit_failure_signal(evidence: str) -> bool:
 
 
 def _is_valid_done_task(task: ExtractedTask) -> bool:
+    if _matches_any(_normalize_key(task.evidence), DONE_EVIDENCE_REJECTION_PATTERNS):
+        return False
     if _is_generic_done_task(task.task):
         return False
     if _has_done_rejection_signal(task.task):
@@ -496,6 +557,11 @@ def _is_valid_new_task(task: ExtractedTask) -> bool:
         NEW_ASSIGNMENT_PATTERNS,
     ):
         return False
+    if _matches_any(evidence, NEW_PLANNING_DEADLINE_PATTERNS) and not _matches_any(
+        _normalize_key(task.task),
+        NEW_ACTION_PATTERNS,
+    ):
+        return False
     return True
 
 
@@ -510,6 +576,8 @@ def _done_clause_supports_task(task_text: str, evidence: str) -> bool:
 
     for clause in _split_clauses(evidence):
         if not _has_explicit_done_signal(clause):
+            continue
+        if _has_done_rejection_signal(clause):
             continue
         clause_terms = _content_terms(clause)
         matches = sum(
@@ -549,6 +617,8 @@ def _is_generic_done_task(task_text: str) -> bool:
     }
     if text in generic_done:
         return True
+    if _is_generic_all_done_without_specific_object(text):
+        return True
 
     vague_patterns = [
         r"^(?:он|она|оно|они|это)\s+готов[аоы]?$",
@@ -556,6 +626,19 @@ def _is_generic_done_task(task_text: str) -> bool:
         r"^(?:мы\s+)?готов[аоы]?\s+к\s+.+$",
     ]
     return any(re.search(pattern, text) for pattern in vague_patterns + WEAK_DONE_PATTERNS)
+
+
+def _is_generic_all_done_without_specific_object(text: str) -> bool:
+    match = re.fullmatch(
+        r"все\s+(?P<object>[а-яa-z0-9 ]{3,80}?)\s+выполнен[аоы]?",
+        text,
+    )
+    if not match:
+        return False
+    object_terms = _content_terms(match.group("object"))
+    if not object_terms:
+        return True
+    return all(term in GENERIC_ALL_DONE_OBJECT_TERMS for term in object_terms)
 
 
 def _has_concrete_done_object(task_text: str) -> bool:
@@ -714,6 +797,10 @@ def _find_duplicate_row_idx(
     for idx, existing in enumerate(unique):
         if not _same_row_group(existing, row):
             continue
+        if _same_source_relaxed_duplicate(existing, row):
+            return idx
+        if _same_failed_status_duplicate(existing, row):
+            return idx
         if _same_generic_done_evidence(existing, row):
             return idx
         if _task_similarity(existing["Задача"], row["Задача"]) >= 0.88:
@@ -736,6 +823,58 @@ def _same_generic_done_evidence(left: dict[str, str], right: dict[str, str]) -> 
         and _is_all_done_summary(right["Задача"])
         and bool(_evidence_refs(left["Обоснование"]) & _evidence_refs(right["Обоснование"]))
     )
+
+
+def _same_source_evidence(left: dict[str, str], right: dict[str, str]) -> bool:
+    left_refs = _evidence_refs(left["Обоснование"])
+    right_refs = _evidence_refs(right["Обоснование"])
+    if left_refs and right_refs:
+        return bool(left_refs & right_refs)
+    return (
+        SequenceMatcher(
+            None,
+            _normalize_quote(left["Обоснование"]),
+            _normalize_quote(right["Обоснование"]),
+        ).ratio()
+        >= 0.82
+    )
+
+
+def _same_source_relaxed_duplicate(
+    left: dict[str, str],
+    right: dict[str, str],
+) -> bool:
+    if not _same_source_evidence(left, right):
+        return False
+    if _task_similarity(left["Задача"], right["Задача"]) >= 0.45:
+        return True
+
+    left_terms = _content_terms(left["Задача"])
+    right_terms = _content_terms(right["Задача"])
+    if not left_terms or not right_terms:
+        return False
+    matches = sum(
+        1
+        for left_term in left_terms
+        if any(_same_term_family(left_term, right_term) for right_term in right_terms)
+    )
+    return matches >= min(2, len(left_terms), len(right_terms))
+
+
+def _same_failed_status_duplicate(
+    left: dict[str, str],
+    right: dict[str, str],
+) -> bool:
+    if left["Блок"] != "Невыполненные":
+        return False
+    left_text = _normalize_key(left["Задача"] + " " + left["Обоснование"])
+    right_text = _normalize_key(right["Задача"] + " " + right["Обоснование"])
+    if not has_failed_signal(left_text) or not has_failed_signal(right_text):
+        return False
+    return _same_source_evidence(left, right) or _task_similarity(
+        left["Задача"],
+        right["Задача"],
+    ) >= 0.55
 
 
 def _is_all_done_summary(task_text: str) -> bool:

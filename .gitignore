@@ -4,5 +4,5 @@
 __pycache__/
 .pytest_cache/
 .ipynb_checkpoints/
-tasks.sqlite
+*.sqlite
 runs/

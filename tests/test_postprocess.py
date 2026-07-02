@@ -1,5 +1,27 @@
 from src.postprocess import build_dataframe, build_dataframe_with_stats
-from src.schemas import ExtractedTask, TaskAnchor, TranscriptUtterance
+from src.schemas import DATAFRAME_COLUMNS, ExtractedTask, TaskAnchor, TranscriptUtterance
+
+
+def test_dataframe_has_required_columns_only() -> None:
+    df, _ = build_dataframe(
+        [
+            ExtractedTask(
+                block="Выполненные",
+                task="Электрические схемы разработаны",
+                responsible="Ленин",
+                deadline_raw="",
+                evidence="Ленин: электрические схемы разработаны.",
+                anchor_ids=(),
+            )
+        ],
+        "2026-04-15",
+    )
+
+    assert list(df.columns) == DATAFRAME_COLUMNS
+    assert len(df.columns) == 5
+    assert "support_count" not in df.columns
+    assert "support_ratio" not in df.columns
+    assert "verification_status" not in df.columns
 
 
 def test_filters_in_progress_as_not_failed() -> None:
@@ -98,6 +120,14 @@ def test_done_filters_vague_readiness_tasks() -> None:
             responsible="Черчилль",
             deadline_raw="",
             evidence="Черчилль: Мы готовы к запуску.",
+            anchor_ids=(),
+        ),
+        ExtractedTask(
+            block="Выполненные",
+            task="все цели выполнены",
+            responsible="Иванова Ольга",
+            deadline_raw="",
+            evidence="Иванова Ольга: все цели выполнены.",
             anchor_ids=(),
         ),
     ]
@@ -716,11 +746,11 @@ def test_responsibility_word_is_not_explicit_assignee_marker() -> None:
 def test_done_task_never_gets_deadline() -> None:
     task = ExtractedTask(
         block="Выполненные",
-        task="все цели выполнены",
+        task="все мероприятия по км выполнены",
         responsible="Иванова Ольга",
         deadline_raw="к 30 апреля",
         evidence=(
-            "Иванова Ольга: все цели выполнены, потом подумала "
+            "Иванова Ольга: все мероприятия по км выполнены, потом подумала "
             "запросить информацию к 30 апреля"
         ),
         anchor_ids=(),
@@ -805,6 +835,201 @@ def test_done_task_requires_concrete_work_object() -> None:
     assert df.empty
 
 
+def test_done_rejects_waiting_or_future_review_clause() -> None:
+    tasks = [
+        ExtractedTask(
+            block="Выполненные",
+            task="утвердили уже, ждём сертификат",
+            responsible="Иванова Ольга",
+            deadline_raw="",
+            evidence=(
+                "Иванова Ольга: Так значит по мп рус по к м по аудиту "
+                "сертификационному мы утвердили уже ждём сертификат."
+            ),
+            anchor_ids=(),
+        ),
+        ExtractedTask(
+            block="Выполненные",
+            task="разработаны мероприятия",
+            responsible="Петрова Анастасия",
+            deadline_raw="",
+            evidence="Петрова Анастасия: Заодно посмотрю, что как разработаны мероприятия.",
+            anchor_ids=(),
+        ),
+        ExtractedTask(
+            block="Выполненные",
+            task="задачу по разработке электрической схеме выполнили, передали",
+            responsible="Ленин",
+            deadline_raw="",
+            evidence=(
+                "Ленин: Леонид, а как я понимаю, когда мы говорим про "
+                "разработку электрической схеме, то есть вы сейчас вот эту "
+                "задачу выполнили, передали и всё."
+            ),
+            anchor_ids=(),
+        ),
+    ]
+
+    df, _ = build_dataframe(tasks, "2026-04-13")
+
+    assert df.empty
+
+
+def test_done_keeps_completed_clause_when_neighboring_clause_is_ongoing() -> None:
+    tasks = [
+        ExtractedTask(
+            block="Выполненные",
+            task="внесли изменения в алгоритм программное обеспечение всё залили",
+            responsible="Черчилль",
+            deadline_raw="",
+            evidence=(
+                "Черчилль: Да всё верно. Вот на об изменениях внесли изменения "
+                "в алгоритм программное обеспечение всё залили, да сейчас вот "
+                "они занимаются отлавливанием мелких нюансов."
+            ),
+            anchor_ids=(),
+        ),
+        ExtractedTask(
+            block="Выполненные",
+            task="подготовил машину для проведения работы",
+            responsible="Черчилль",
+            deadline_raw="",
+            evidence=(
+                "Черчилль: Прорабатываются ещё какие то дополнительные настройки "
+                "на виртуальной машине. Там системный администратор произвёл, "
+                "подготовил машину, собственно, передачу нам для проведения работы."
+            ),
+            anchor_ids=(),
+        ),
+    ]
+
+    df, _ = build_dataframe(tasks, "2026-04-15")
+
+    assert len(df) == 2
+
+
+def test_done_rejects_generic_preparatory_work_object() -> None:
+    task = ExtractedTask(
+        block="Выполненные",
+        task="подготовительные работы произвёл",
+        responsible="Черчилль",
+        deadline_raw="",
+        evidence=(
+            "Черчилль: Автоматический запуск сервисов. На данный момент я ещё "
+            "не успел это сделать, но подготовительные работы я произвёл."
+        ),
+        anchor_ids=(),
+    )
+
+    df, _ = build_dataframe([task], "2026-04-15")
+
+    assert df.empty
+
+
+def test_new_task_rejects_deadline_planning_without_action() -> None:
+    task = ExtractedTask(
+        block="Новые",
+        task="рассылку запросов",
+        responsible="Иванова Ольга",
+        deadline_raw="до конца недели",
+        evidence=(
+            "Иванова Ольга: Так, тогда давайте также поставим себе задачу, "
+            "какой срок общий возьмём на рассылку запросов. "
+            "Иванова Ольга: До конца недели, или возможно, до середины недели."
+        ),
+        anchor_ids=(),
+    )
+
+    df, _ = build_dataframe([task], "2026-04-13")
+
+    assert df.empty
+
+
+def test_deduplicate_rows_from_same_evidence_source() -> None:
+    tasks = [
+        ExtractedTask(
+            block="Новые",
+            task="собраться с Чайка и закрепить ответственность за внешние аудиты",
+            responsible="Иванова Ольга",
+            deadline_raw="завтра",
+            evidence=(
+                "[0294] Иванова Ольга: завтра с Чайка должны собраться, "
+                "чтобы закрепить ответственность за внешние аудиты."
+            ),
+            anchor_ids=(),
+        ),
+        ExtractedTask(
+            block="Новые",
+            task="собраться, чтобы распределить и закрепить ответственность за внешние аудиты",
+            responsible="Иванова Ольга",
+            deadline_raw="завтра",
+            evidence=(
+                "[0294] Иванова Ольга: завтра с Чайка должны собраться, "
+                "чтобы закрепить ответственность за внешние аудиты."
+            ),
+            anchor_ids=(),
+        ),
+    ]
+
+    df, _ = build_dataframe(tasks, "2026-04-13")
+
+    assert len(df) == 1
+
+
+def test_deduplicate_failed_not_done_variants() -> None:
+    tasks = [
+        ExtractedTask(
+            block="Невыполненные",
+            task="не сделал, потому что ещё не раздвигал по длине",
+            responsible="Человек 4",
+            deadline_raw="",
+            evidence="Человек 4: я пока так не сделал, потому что ещё не раздвигал по длине",
+            anchor_ids=(),
+        ),
+        ExtractedTask(
+            block="Невыполненные",
+            task="пока так не сделал",
+            responsible="Человек 4",
+            deadline_raw="",
+            evidence="[0281] Человек 4: я пока так не сделал, потому что ещё не раздвигал по длине",
+            anchor_ids=(),
+        ),
+    ]
+
+    df, _ = build_dataframe(tasks, "2026-04-29")
+
+    assert len(df) == 1
+
+
+def test_deduplicate_done_variants_from_same_evidence_source() -> None:
+    tasks = [
+        ExtractedTask(
+            block="Выполненные",
+            task="подготовил отчет для встречи",
+            responsible="Иван",
+            deadline_raw="",
+            evidence=(
+                "[0005] Иван: отчет подготовил для встречи и отправил команде."
+            ),
+            anchor_ids=(),
+        ),
+        ExtractedTask(
+            block="Выполненные",
+            task="отчет подготовлен для встречи",
+            responsible="Иван",
+            deadline_raw="",
+            evidence=(
+                "[0005] Иван: отчет подготовил для встречи и отправил команде."
+            ),
+            anchor_ids=(),
+        ),
+    ]
+
+    df, _ = build_dataframe(tasks, "2026-04-15")
+
+    assert len(df) == 1
+
+
 def test_done_rejects_negative_passive_status_clause() -> None:
     task = ExtractedTask(
         block="Выполненные",
@@ -827,23 +1052,23 @@ def test_done_generic_all_done_rows_from_same_evidence_are_merged() -> None:
     tasks = [
         ExtractedTask(
             block="Выполненные",
-            task="все цели выполнены",
+            task="все мероприятия выполнены",
             responsible="Иванова Ольга",
             deadline_raw="",
             evidence=(
-                "[0178] Иванова Ольга: по целям все цели выполнены, "
-                "по поводу п к его все мероприятия выполнены"
+                "[0178] Иванова Ольга: все мероприятия выполнены, "
+                "все мероприятия по км выполнены"
             ),
             anchor_ids=(),
         ),
         ExtractedTask(
             block="Выполненные",
-            task="все мероприятия выполнены",
+            task="все мероприятия по км выполнены",
             responsible="Иванова Ольга",
             deadline_raw="",
             evidence=(
-                "[0178] Иванова Ольга: по целям все цели выполнены, "
-                "по поводу п к его все мероприятия выполнены"
+                "[0178] Иванова Ольга: все мероприятия выполнены, "
+                "все мероприятия по км выполнены"
             ),
             anchor_ids=(),
         ),

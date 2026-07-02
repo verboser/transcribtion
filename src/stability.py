@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from difflib import SequenceMatcher
+import math
 from pathlib import Path
 import re
 from typing import Callable
@@ -10,11 +11,30 @@ import pandas as pd
 
 from src.date_normalizer import DateReplacement, normalize_deadline
 from src.postprocess import build_dataframe_with_stats, row_signature
-from src.schemas import BLOCK_ORDER, DATAFRAME_COLUMNS, ExtractionResult
+from src.schemas import (
+    BLOCK_ORDER,
+    DATAFRAME_COLUMNS,
+    ExtractionResult,
+    VerificationCandidate,
+)
 from src.semantic_similarity import SEMANTIC_TASK_THRESHOLD, semantic_similarity
 
 
 Extractor = Callable[[Path, str], ExtractionResult]
+ConsensusVerifier = Callable[[list[VerificationCandidate], str], set[str]]
+
+
+@dataclass(frozen=True)
+class FinalTaskSupport:
+    block: str
+    task: str
+    responsible: str
+    deadline: str
+    evidence: str
+    support_count: int
+    support_ratio: float
+    run_indices: tuple[int, ...]
+    verification_status: str = "raw_consensus"
 
 
 @dataclass
@@ -25,6 +45,15 @@ class StabilityReport:
     final_df: pd.DataFrame
     final_replacements: list[DateReplacement]
     final_source: str
+    run_dataframes: list[pd.DataFrame]
+    final_task_support: list[FinalTaskSupport]
+    support_threshold: int
+    min_consensus_share: float
+    min_pairwise_consensus_jaccard: float
+    max_count_delta: float
+    stability_passed: bool
+    verified_candidate_count: int
+    verifier_candidate_count: int
 
 
 def run_stability_check(
@@ -32,7 +61,20 @@ def run_stability_check(
     meeting_date: str,
     runs: int,
     extractor: Extractor,
+    min_consensus_share: float = 0.90,
+    max_allowed_count_delta: float = 0.10,
+    verifier: ConsensusVerifier | None = None,
+    min_verifier_support_share: float = 0.60,
 ) -> StabilityReport:
+    if runs < 1:
+        raise ValueError("runs must be at least 1.")
+    if not 0 < min_consensus_share <= 1:
+        raise ValueError("min_consensus_share must be in the (0, 1] interval.")
+    if max_allowed_count_delta < 0:
+        raise ValueError("max_allowed_count_delta must be non-negative.")
+    if not 0 < min_verifier_support_share <= 1:
+        raise ValueError("min_verifier_support_share must be in the (0, 1] interval.")
+
     extractions: list[ExtractionResult] = []
     report_lines: list[str] = []
     count_rows: list[dict[str, int]] = []
@@ -43,18 +85,16 @@ def run_stability_check(
     filtered_counts: list[int] = []
     dedup_removed_counts: list[int] = []
     dataframes: list[pd.DataFrame] = []
-    replacements_by_run: list[list[DateReplacement]] = []
 
     for run_idx in range(1, runs + 1):
         result = extractor(transcript_path, meeting_date)
         extractions.append(result)
-        df, replacements, stats = build_dataframe_with_stats(
+        df, _replacements, stats = build_dataframe_with_stats(
             result.tasks,
             meeting_date,
             result.anchors,
         )
         dataframes.append(df)
-        replacements_by_run.append(replacements)
         counts = _count_dataframe(df)
         count_rows.append(counts)
         signatures = {row_signature(row) for _, row in df.iterrows()}
@@ -132,23 +172,95 @@ def run_stability_check(
             )
         )
 
-    support_threshold = _consensus_support_threshold(dataframes)
+    consensus_groups = _build_consensus_groups(dataframes)
+    support_threshold = _consensus_support_threshold(dataframes, min_consensus_share)
+    verifier_support_threshold = _consensus_support_threshold(
+        dataframes,
+        min_verifier_support_share,
+    )
+    verifier_candidates, candidate_group_by_id = _build_verification_candidates(
+        groups=consensus_groups,
+        selected_run_idx=selected_run_idx,
+        run_count=len(dataframes),
+        support_threshold=support_threshold,
+        verifier_support_threshold=verifier_support_threshold,
+    )
+    verified_candidate_ids = (
+        verifier(verifier_candidates, meeting_date)
+        if verifier is not None and verifier_candidates
+        else set()
+    )
+    verified_group_indices = {
+        candidate_group_by_id[candidate_id]
+        for candidate_id in verified_candidate_ids
+        if candidate_id in candidate_group_by_id
+    }
     consensus_df = _build_consensus_dataframe(
         dataframes,
         selected_run_idx=selected_run_idx,
         support_threshold=support_threshold,
+        groups=consensus_groups,
+        verified_group_indices=verified_group_indices,
     )
-    union_count = _count_consensus_groups(dataframes)
+    union_count = len(consensus_groups)
+    strict_consensus_count = sum(
+        1 for group in consensus_groups if len(group) >= support_threshold
+    )
     report_lines.append(
         f"Consensus support>={support_threshold}: "
-        f"{len(consensus_df)} из {union_count} уникальных строк"
+        f"{strict_consensus_count} из {union_count} уникальных строк"
+    )
+    report_lines.append(
+        "Verifier candidates support>={threshold}: {accepted}/{total}".format(
+            threshold=verifier_support_threshold,
+            accepted=len(verified_group_indices),
+            total=len(verifier_candidates),
+        )
+    )
+
+    count_deltas = _relative_count_deltas(count_rows)
+    max_count_delta = max(count_deltas.values(), default=0.0)
+    report_lines.append(
+        "Макс. расхождение количества: "
+        + ", ".join(
+            f"{key}={value:.0%}"
+            for key, value in count_deltas.items()
+        )
+    )
+
+    min_pairwise_consensus_jaccard = _min_pairwise_consensus_jaccard(
+        consensus_groups,
+        run_count=len(dataframes),
+    )
+    report_lines.append(
+        "Минимальный pairwise consensus Jaccard: "
+        f"{min_pairwise_consensus_jaccard:.2f}"
+    )
+
+    stability_passed = (
+        max_count_delta <= max_allowed_count_delta
+        and min_pairwise_consensus_jaccard >= min_consensus_share
+    )
+    report_lines.append(
+        "Порог стабильности {share:.0%}: {status}".format(
+            share=min_consensus_share,
+            status="Да" if stability_passed else "Нет",
+        )
     )
 
     final_df, final_replacements, final_source = _select_final_dataframe(
         dataframes=dataframes,
-        replacements_by_run=replacements_by_run,
         selected_run_idx=selected_run_idx,
         meeting_date=meeting_date,
+        min_consensus_share=min_consensus_share,
+        groups=consensus_groups,
+        verified_group_indices=verified_group_indices,
+    )
+    final_task_support = _build_final_task_support(
+        final_df,
+        consensus_groups,
+        run_count=len(dataframes),
+        verified_group_indices=verified_group_indices,
     )
     report_lines.append(f"Источник финального результата: {final_source}")
 
@@ -159,6 +271,15 @@ def run_stability_check(
         final_df=final_df,
         final_replacements=final_replacements,
         final_source=final_source,
+        run_dataframes=[df.copy() for df in dataframes],
+        final_task_support=final_task_support,
+        support_threshold=support_threshold,
+        min_consensus_share=min_consensus_share,
+        min_pairwise_consensus_jaccard=min_pairwise_consensus_jaccard,
+        max_count_delta=max_count_delta,
+        stability_passed=stability_passed,
+        verified_candidate_count=len(verified_group_indices),
+        verifier_candidate_count=len(verifier_candidates),
     )
 
 
@@ -206,48 +327,53 @@ def _count_one_off_consensus_groups(dataframes: list[pd.DataFrame]) -> int:
 
 def _select_final_dataframe(
     dataframes: list[pd.DataFrame],
-    replacements_by_run: list[list[DateReplacement]],
     selected_run_idx: int | None,
     meeting_date: str,
+    min_consensus_share: float,
+    groups: list[dict[int, dict[str, str]]],
+    verified_group_indices: set[int],
 ) -> tuple[pd.DataFrame, list[DateReplacement], str]:
-    support_threshold = _consensus_support_threshold(dataframes)
+    support_threshold = _consensus_support_threshold(dataframes, min_consensus_share)
     consensus_df = _build_consensus_dataframe(
         dataframes,
         selected_run_idx=selected_run_idx,
         support_threshold=support_threshold,
+        groups=groups,
+        verified_group_indices=verified_group_indices,
     )
-    union_count = _count_consensus_groups(dataframes)
-
-    if not consensus_df.empty or union_count == 0:
-        return (
-            consensus_df,
-            _build_consensus_replacements(consensus_df, meeting_date),
-            f"consensus support>={support_threshold}",
-        )
-
-    fallback_idx = selected_run_idx if selected_run_idx is not None else len(dataframes) - 1
+    source = f"consensus support>={support_threshold} ({min_consensus_share:.0%})"
+    if verified_group_indices:
+        source += f" + verified_consensus={len(verified_group_indices)}"
     return (
-        dataframes[fallback_idx].copy(),
-        replacements_by_run[fallback_idx],
-        f"centroid fallback run_{fallback_idx + 1}",
+        consensus_df,
+        _build_consensus_replacements(consensus_df, meeting_date),
+        source,
     )
 
 
-def _consensus_support_threshold(dataframes: list[pd.DataFrame]) -> int:
-    return 1 if len(dataframes) == 1 else 2
+def _consensus_support_threshold(
+    dataframes: list[pd.DataFrame],
+    min_consensus_share: float,
+) -> int:
+    if not dataframes:
+        return 0
+    return max(1, math.ceil(len(dataframes) * min_consensus_share))
 
 
 def _build_consensus_dataframe(
     dataframes: list[pd.DataFrame],
     selected_run_idx: int | None,
     support_threshold: int,
+    groups: list[dict[int, dict[str, str]]] | None = None,
+    verified_group_indices: set[int] | None = None,
 ) -> pd.DataFrame:
-    groups = _build_consensus_groups(dataframes)
+    groups = groups if groups is not None else _build_consensus_groups(dataframes)
+    verified_group_indices = verified_group_indices or set()
 
     preferred_run_idx = selected_run_idx if selected_run_idx is not None else 0
     rows: list[dict[str, str]] = []
-    for run_rows in groups:
-        if len(run_rows) < support_threshold:
+    for group_idx, run_rows in enumerate(groups):
+        if len(run_rows) < support_threshold and group_idx not in verified_group_indices:
             continue
         if preferred_run_idx in run_rows:
             rows.append(dict(run_rows[preferred_run_idx]))
@@ -284,6 +410,88 @@ def _count_consensus_groups(dataframes: list[pd.DataFrame]) -> int:
     return len(_build_consensus_groups(dataframes))
 
 
+def _build_final_task_support(
+    final_df: pd.DataFrame,
+    groups: list[dict[int, dict[str, str]]],
+    run_count: int,
+    verified_group_indices: set[int] | None = None,
+) -> list[FinalTaskSupport]:
+    if final_df.empty:
+        return []
+
+    verified_group_indices = verified_group_indices or set()
+    support_rows: list[FinalTaskSupport] = []
+    for _, row in final_df.iterrows():
+        row_dict = row.to_dict()
+        group_idx = _find_matching_group_idx(row_dict, groups)
+        group = groups[group_idx] if group_idx is not None else {}
+        run_indices = tuple(idx + 1 for idx in sorted(group))
+        support_count = len(run_indices)
+        support_rows.append(
+            FinalTaskSupport(
+                block=row_dict["Блок"],
+                task=row_dict["Задача"],
+                responsible=row_dict["Ответственный"],
+                deadline=row_dict["Срок"],
+                evidence=row_dict["Обоснование"],
+                support_count=support_count,
+                support_ratio=_safe_div(support_count, run_count),
+                run_indices=run_indices,
+                verification_status=(
+                    "verified_consensus"
+                    if group_idx in verified_group_indices
+                    else "raw_consensus"
+                ),
+            )
+        )
+    return support_rows
+
+
+def _find_matching_group_idx(
+    row: dict[str, str],
+    groups: list[dict[int, dict[str, str]]],
+) -> int | None:
+    for group_idx, group in enumerate(groups):
+        if any(_same_consensus_group(row, candidate) for candidate in group.values()):
+            return group_idx
+    return None
+
+
+def _build_verification_candidates(
+    groups: list[dict[int, dict[str, str]]],
+    selected_run_idx: int | None,
+    run_count: int,
+    support_threshold: int,
+    verifier_support_threshold: int,
+) -> tuple[list[VerificationCandidate], dict[str, int]]:
+    preferred_run_idx = selected_run_idx if selected_run_idx is not None else 0
+    candidates: list[VerificationCandidate] = []
+    group_by_id: dict[str, int] = {}
+
+    for group_idx, group in enumerate(groups):
+        support_count = len(group)
+        if support_count < verifier_support_threshold or support_count >= support_threshold:
+            continue
+        row = group.get(preferred_run_idx) or group[min(group)]
+        candidate_id = f"C{len(candidates) + 1:03d}"
+        group_by_id[candidate_id] = group_idx
+        candidates.append(
+            VerificationCandidate(
+                candidate_id=candidate_id,
+                block=row["Блок"],
+                task=row["Задача"],
+                responsible=row["Ответственный"],
+                deadline=row["Срок"],
+                evidence=row["Обоснование"],
+                support_count=support_count,
+                support_ratio=_safe_div(support_count, run_count),
+                run_indices=tuple(idx + 1 for idx in sorted(group)),
+            )
+        )
+
+    return candidates, group_by_id
+
+
 def _find_consensus_group_idx(
     row: dict[str, str],
     groups: list[dict[int, dict[str, str]]],
@@ -311,6 +519,39 @@ def _evidence_compatible(left: str, right: str) -> bool:
     if left_refs and right_refs:
         return bool(left_refs & right_refs)
     return SequenceMatcher(None, _normalize_key(left), _normalize_key(right)).ratio() >= 0.78
+
+
+def _relative_count_deltas(count_rows: list[dict[str, int]]) -> dict[str, float]:
+    keys = ["Выполненные", "Невыполненные", "Новые", "Всего"]
+    deltas: dict[str, float] = {}
+    for key in keys:
+        values = [counts[key] for counts in count_rows]
+        if not values:
+            deltas[key] = 0.0
+            continue
+        max_value = max(values)
+        min_value = min(values)
+        deltas[key] = 0.0 if max_value == 0 else (max_value - min_value) / max_value
+    return deltas
+
+
+def _min_pairwise_consensus_jaccard(
+    groups: list[dict[int, dict[str, str]]],
+    run_count: int,
+) -> float:
+    if run_count <= 1:
+        return 1.0
+
+    group_ids_by_run: list[set[int]] = [set() for _ in range(run_count)]
+    for group_idx, group in enumerate(groups):
+        for run_idx in group:
+            group_ids_by_run[run_idx].add(group_idx)
+
+    scores: list[float] = []
+    for left_idx in range(run_count):
+        for right_idx in range(left_idx + 1, run_count):
+            scores.append(_jaccard(group_ids_by_run[left_idx], group_ids_by_run[right_idx]))
+    return min(scores) if scores else 1.0
 
 
 def _task_similarity(left: str, right: str) -> float:
@@ -353,6 +594,10 @@ def _content_terms(value: str) -> list[str]:
 
 def _term_family(term: str) -> str:
     return term[:7] if len(term) >= 7 else term
+
+
+def _safe_div(numerator: int, denominator: int) -> float:
+    return numerator / denominator if denominator else 0.0
 
 
 def _normalize_key(value: str) -> str:

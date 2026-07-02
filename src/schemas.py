@@ -76,6 +76,72 @@ class ExtractionResult:
     raw_response: dict
 
 
+@dataclass(frozen=True)
+class VerificationCandidate:
+    candidate_id: str
+    block: str
+    task: str
+    responsible: str
+    deadline: str
+    evidence: str
+    support_count: int
+    support_ratio: float
+    run_indices: tuple[int, ...]
+
+
+TASK_ITEM_JSON_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "block",
+        "task",
+        "responsible",
+        "deadline_raw",
+        "evidence",
+        "anchor_ids",
+    ],
+    "properties": {
+        "block": {
+            "type": "string",
+            "enum": ["Выполненные", "Невыполненные", "Новые"],
+        },
+        "task": {
+            "type": "string",
+            "description": "Краткая формулировка задачи.",
+        },
+        "responsible": {
+            "type": "string",
+            "description": (
+                "Явно назначенный ответственный из реплики-обоснования. "
+                "Если такого назначения нет, говорящий из evidence."
+            ),
+        },
+        "deadline_raw": {
+            "type": "string",
+            "description": (
+                "Дословная фраза срока из реплики. Пустая строка, "
+                "если срока нет."
+            ),
+        },
+        "evidence": {
+            "type": "string",
+            "description": (
+                "Дословная цитата из транскрипта с именем спикера, "
+                "подтверждающая задачу, статус и срок при наличии."
+            ),
+        },
+        "anchor_ids": {
+            "type": "array",
+            "description": (
+                "ID anchor-блоков, из которых извлечена задача. "
+                "Можно указать несколько, если задача и срок в соседних anchors."
+            ),
+            "items": {"type": "string"},
+        },
+    },
+}
+
+
 TASK_EXTRACTION_JSON_SCHEMA = {
     "name": "meeting_task_extraction",
     "strict": True,
@@ -86,54 +152,79 @@ TASK_EXTRACTION_JSON_SCHEMA = {
         "properties": {
             "tasks": {
                 "type": "array",
+                "items": TASK_ITEM_JSON_SCHEMA,
+            }
+        },
+    },
+}
+
+
+ANCHOR_DECISION_JSON_SCHEMA = {
+    "name": "meeting_anchor_task_decisions",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["anchor_decisions"],
+        "properties": {
+            "anchor_decisions": {
+                "type": "array",
+                "description": (
+                    "Ровно одно решение для каждого anchor из входной группы. "
+                    "Если в anchor нет задач, tasks должен быть пустым массивом."
+                ),
                 "items": {
                     "type": "object",
                     "additionalProperties": False,
-                    "required": [
-                        "block",
-                        "task",
-                        "responsible",
-                        "deadline_raw",
-                        "evidence",
-                        "anchor_ids",
-                    ],
+                    "required": ["anchor_id", "tasks"],
                     "properties": {
-                        "block": {
+                        "anchor_id": {
                             "type": "string",
-                            "enum": ["Выполненные", "Невыполненные", "Новые"],
+                            "description": "ID anchor-блока из входа.",
                         },
-                        "task": {
-                            "type": "string",
-                            "description": "Краткая формулировка задачи.",
-                        },
-                        "responsible": {
-                            "type": "string",
-                            "description": (
-                                "Явно назначенный ответственный из реплики-обоснования. "
-                                "Если такого назначения нет, говорящий из evidence."
-                            ),
-                        },
-                        "deadline_raw": {
-                            "type": "string",
-                            "description": (
-                                "Дословная фраза срока из реплики. Пустая строка, "
-                                "если срока нет."
-                            ),
-                        },
-                        "evidence": {
-                            "type": "string",
-                            "description": (
-                                "Дословная цитата из транскрипта с именем спикера, "
-                                "подтверждающая задачу, статус и срок при наличии."
-                            ),
-                        },
-                        "anchor_ids": {
+                        "tasks": {
                             "type": "array",
+                            "description": "Задачи, подтвержденные этим anchor.",
+                            "items": TASK_ITEM_JSON_SCHEMA,
+                        },
+                    },
+                },
+            }
+        },
+    },
+}
+
+
+TASK_VERIFICATION_JSON_SCHEMA = {
+    "name": "meeting_task_verification",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["decisions"],
+        "properties": {
+            "decisions": {
+                "type": "array",
+                "description": "Решение verifier по каждому кандидату.",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["candidate_id", "keep", "reason"],
+                    "properties": {
+                        "candidate_id": {
+                            "type": "string",
+                            "description": "ID кандидата из входного списка.",
+                        },
+                        "keep": {
+                            "type": "boolean",
                             "description": (
-                                "ID anchor-блоков, из которых извлечена задача. "
-                                "Можно указать несколько, если задача и срок в соседних anchors."
+                                "true, только если evidence прямо подтверждает "
+                                "блок, задачу, ответственного и срок."
                             ),
-                            "items": {"type": "string"},
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "Короткая причина решения.",
                         },
                     },
                 },
