@@ -78,6 +78,152 @@ def test_keeps_explicit_done_task() -> None:
     assert len(df) == 1
 
 
+def test_done_allows_normalized_task_from_past_tense_evidence() -> None:
+    df, _ = build_dataframe(
+        [
+            ExtractedTask(
+                block="Выполненные",
+                task="Отправить презентацию",
+                responsible="Петров",
+                deadline_raw="",
+                evidence="Петров: презентацию уже отправили.",
+                anchor_ids=(),
+            )
+        ],
+        "2026-04-15",
+    )
+
+    assert len(df) == 1
+    assert df.iloc[0]["Задача"] == "Отправить презентацию"
+
+
+def test_new_allows_normalized_meeting_task_when_evidence_supports_it() -> None:
+    df, _ = build_dataframe(
+        [
+            ExtractedTask(
+                block="Новые",
+                task="Провести встречу",
+                responsible="Иван",
+                deadline_raw="",
+                evidence="Иван: давайте 13 мая соберемся и обсудим детали.",
+                anchor_ids=(),
+            )
+        ],
+        "2026-04-29",
+    )
+
+    assert len(df) == 1
+    assert df.iloc[0]["Задача"] == "Провести встречу"
+    assert df.iloc[0]["Срок"] == "2026-05-13"
+
+
+def test_new_rejects_normalized_task_without_evidence_support() -> None:
+    df, _ = build_dataframe(
+        [
+            ExtractedTask(
+                block="Новые",
+                task="Подготовить отчет",
+                responsible="Иван",
+                deadline_raw="",
+                evidence="Иван: давайте 13 мая соберемся и обсудим детали.",
+                anchor_ids=(),
+            )
+        ],
+        "2026-04-29",
+    )
+
+    assert df.empty
+
+
+def test_new_rejects_topic_deadline_and_assignee_without_action() -> None:
+    tasks = [
+        ExtractedTask(
+            block="Новые",
+            task="Провести рабочую встречу по постановке целей и оценке рисков на 2026 год",
+            responsible="Ефарова",
+            deadline_raw="13 апреля",
+            evidence=(
+                "[0108] Иванова Ольга: По постановке цели и оценке рисков "
+                "на 26 год. Срок 13 апреля. Ответственно ефарова."
+            ),
+            anchor_ids=(),
+        ),
+        ExtractedTask(
+            block="Новые",
+            task="Оценить риски и поставить цели на 2026 год",
+            responsible="Иванова Ольга",
+            deadline_raw="17 апреля",
+            evidence=(
+                "[0112] Иванова Ольга: Оценка рисков и постановка целей "
+                "на 26 год. Срок 17 апреля."
+            ),
+            anchor_ids=(),
+        ),
+    ]
+
+    df, _ = build_dataframe(tasks, "2026-04-13")
+
+    assert df.empty
+
+
+def test_new_keeps_recap_with_nominal_action_and_deadline() -> None:
+    df, _ = build_dataframe(
+        [
+            ExtractedTask(
+                block="Новые",
+                task="Подготовить отчет и ПКМ по аудиту первой стороны",
+                responsible="Гочнева Татьяна",
+                deadline_raw="17 апреля",
+                evidence=(
+                    "[0454] Иванова Ольга: 17 апреля срок подготовка отчета "
+                    "и ПКМ по аудиту первой стороны."
+                ),
+                anchor_ids=(),
+            )
+        ],
+        "2026-04-13",
+    )
+
+    assert len(df) == 1
+    assert df.iloc[0]["Срок"] == "2026-04-17"
+
+
+def test_new_rejects_current_preparation_state_without_assignment() -> None:
+    df, _ = build_dataframe(
+        [
+            ExtractedTask(
+                block="Новые",
+                task="Подготовиться к встрече 2 числа с Константином",
+                responsible="Иван",
+                deadline_raw="2 мая",
+                evidence="Иван: Мы готовимся ко 2 числу, встреча с Константином.",
+                anchor_ids=(),
+            )
+        ],
+        "2026-04-29",
+    )
+
+    assert df.empty
+
+
+def test_new_rejects_calendar_meeting_state_without_assignment() -> None:
+    df, _ = build_dataframe(
+        [
+            ExtractedTask(
+                block="Новые",
+                task="Провести встречу с Константином",
+                responsible="Иван",
+                deadline_raw="2 мая",
+                evidence="Иван: У нас встреча 2 мая с Константином.",
+                anchor_ids=(),
+            )
+        ],
+        "2026-04-29",
+    )
+
+    assert df.empty
+
+
 def test_done_filters_state_description_without_done_signal() -> None:
     df, _ = build_dataframe(
         [
@@ -507,7 +653,7 @@ def test_new_task_drops_evidence_that_only_supports_deadline() -> None:
     assert df.empty
 
 
-def test_new_task_requires_lexically_supported_task_phrase() -> None:
+def test_new_task_allows_supported_normalized_task_phrase() -> None:
     anchor = TaskAnchor(
         anchor_id="A001",
         kind="new",
@@ -538,7 +684,7 @@ def test_new_task_requires_lexically_supported_task_phrase() -> None:
     paraphrased_df, _ = build_dataframe([paraphrased], "2026-04-29", [anchor])
     lexical_df, _ = build_dataframe([lexical], "2026-04-29", [anchor])
 
-    assert paraphrased_df.empty
+    assert len(paraphrased_df) == 1
     assert len(lexical_df) == 1
 
 

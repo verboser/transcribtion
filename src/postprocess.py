@@ -175,29 +175,71 @@ GENERIC_ALL_DONE_OBJECT_TERMS = {
     "вопросы",
     "пункты",
 }
-ONGOING_NEW_PATTERNS = ONGOING_STATE_PATTERNS
+ONGOING_NEW_PATTERNS = ONGOING_STATE_PATTERNS + [
+    r"\bготовим(?:ся|сь)\b",
+]
 NEW_PLANNING_DEADLINE_PATTERNS = [
     r"\bкакой\s+срок\b",
     r"\bсрок\s+общий\b",
     r"\bсрок\b.+\bобсудим\b",
 ]
 NEW_ACTION_PATTERNS = [
-    r"\bсформировать\b",
+    r"\bсформир",
     r"\bподготов",
-    r"\bсобрать\b",
+    r"\bсобра(?:ть|ться|лись|ться)\b",
+    r"\bсобер(?:ем|ём|емся|етесь|ется|итесь)\b",
     r"\bпровести\b",
-    r"\bсогласовать\b",
-    r"\bдоработать\b",
-    r"\bнаправить\b",
+    r"\bсогласова",
+    r"\bсогласу",
+    r"\bдоработа",
+    r"\bнаправ",
     r"\bначать\b",
-    r"\bсобраться\b",
-    r"\bутвердить\b",
+    r"\bутверд",
+    r"\bобсуд",
+    r"\bназнач",
+    r"\bпровер",
+    r"\bразосл",
+    r"\bпришл",
+    r"\bвысл",
+    r"\bсдела",
+    r"\bпереда",
+]
+NEW_TASK_INTENT_PATTERNS = [
+    r"\bзадач",
+    r"\bпод\s+протокол\b",
+    r"\bв\s+протокол\b",
+    r"\bнужно\b",
+    r"\bнадо\b",
+    r"\bдолжн",
+    r"\bпрошу\b",
+    r"\bпросьба\b",
+    r"\bпоруч",
+    r"\bдавайте\b",
+    r"\bпредлагаю\b",
+    r"\bот\s+тебя\b",
+    r"\bбер[её]м\s+в\s+работу\b",
+    r"\bвозьм(?:ем|ём|ите)\b",
+    r"\bдоговорил[аи]сь\b",
+    r"\bдоговоримся\b",
+    r"\bзафиксируем\b",
+    r"\bфиксируем\b",
+    r"\bставим\s+срок\b",
+    r"\bбудем\s+(?:делать|готовить|обсуждать|согласовывать|"
+    r"дорабатывать|проверять|направлять|проводить)\b",
+]
+NEW_CALENDAR_STATE_PATTERNS = [
+    r"\bу\s+нас\s+(?:есть\s+|будет\s+)?(?:встреча|совещание|созвон)\b",
 ]
 DONE_EVIDENCE_REJECTION_PATTERNS = [
     r"\bпосмотрю\b.+\bразработан",
     r"\bутвердил[аи]?\b.+\bжд[её]м\b",
     r"\bкак\s+я\s+понимаю\b.+\bзадач\w*\b.+\bвыполнил",
 ]
+SEMANTIC_TERM_GROUP_PREFIXES = (
+    ("встреч", "собер", "совещ", "созвон", "обсуд"),
+    ("отправ", "направ", "высл", "пересл"),
+    ("утверд", "соглас"),
+)
 
 
 @dataclass(frozen=True)
@@ -552,6 +594,8 @@ def _is_valid_done_task(task: ExtractedTask) -> bool:
 
 def _is_valid_new_task(task: ExtractedTask) -> bool:
     evidence = _normalize_key(task.evidence)
+    if not _new_task_has_action_support(task.task, task.evidence):
+        return False
     if _matches_any(evidence, ONGOING_NEW_PATTERNS) and not _matches_any(
         evidence,
         NEW_ASSIGNMENT_PATTERNS,
@@ -563,6 +607,22 @@ def _is_valid_new_task(task: ExtractedTask) -> bool:
     ):
         return False
     return True
+
+
+def _new_task_has_action_support(task_text: str, evidence: str) -> bool:
+    evidence_key = _normalize_key(evidence)
+    task_key = _normalize_key(task_text)
+    if _matches_any(evidence_key, NEW_ACTION_PATTERNS):
+        return True
+    has_intent = _matches_any(evidence_key, NEW_TASK_INTENT_PATTERNS)
+    if _matches_any(evidence_key, NEW_CALENDAR_STATE_PATTERNS) and not has_intent:
+        return False
+    if has_intent and _matches_any(task_key, NEW_ACTION_PATTERNS):
+        return True
+    return _has_strong_semantic_action_overlap(
+        _content_terms(task_text),
+        _content_terms(evidence),
+    )
 
 
 def _has_explicit_done_signal(evidence: str) -> bool:
@@ -583,7 +643,7 @@ def _done_clause_supports_task(task_text: str, evidence: str) -> bool:
         matches = sum(
             1
             for task_term in task_terms
-            if any(_same_term_family(task_term, clause_term) for clause_term in clause_terms)
+            if any(_terms_support_same_meaning(task_term, clause_term) for clause_term in clause_terms)
         )
         if matches >= min(2, len(task_terms)):
             return True
@@ -683,13 +743,11 @@ def _evidence_supports_task(task: str, evidence: str) -> bool:
         return False
 
     evidence_terms = _content_terms(evidence)
-    matches = sum(
-        1
-        for task_term in task_terms
-        if any(_same_term_family(task_term, evidence_term) for evidence_term in evidence_terms)
-    )
+    matches = _count_supported_task_terms(task_terms, evidence_terms)
     required_matches = min(2, len(task_terms))
     if matches >= required_matches:
+        return True
+    if _has_strong_semantic_action_overlap(task_terms, evidence_terms):
         return True
 
     score = semantic_similarity(task, evidence)
@@ -727,6 +785,48 @@ def _same_term_family(left: str, right: str) -> bool:
     if len(left) >= 5 and len(right) >= 5:
         return left[:5] == right[:5] or SequenceMatcher(None, left, right).ratio() >= 0.66
     return False
+
+
+def _count_supported_task_terms(
+    task_terms: list[str],
+    evidence_terms: list[str],
+) -> int:
+    return sum(
+        1
+        for task_term in task_terms
+        if any(
+            _terms_support_same_meaning(task_term, evidence_term)
+            for evidence_term in evidence_terms
+        )
+    )
+
+
+def _terms_support_same_meaning(left: str, right: str) -> bool:
+    return _same_term_family(left, right) or _same_semantic_term_group(left, right)
+
+
+def _same_semantic_term_group(left: str, right: str) -> bool:
+    for prefixes in SEMANTIC_TERM_GROUP_PREFIXES:
+        if _matches_prefix_group(left, prefixes) and _matches_prefix_group(right, prefixes):
+            return True
+    return False
+
+
+def _matches_prefix_group(term: str, prefixes: tuple[str, ...]) -> bool:
+    return any(term.startswith(prefix) for prefix in prefixes)
+
+
+def _has_strong_semantic_action_overlap(
+    task_terms: list[str],
+    evidence_terms: list[str],
+) -> bool:
+    if len(task_terms) > 3:
+        return False
+    return any(
+        _same_semantic_term_group(task_term, evidence_term)
+        for task_term in task_terms
+        for evidence_term in evidence_terms
+    )
 
 
 def _matches_any(text: str, patterns: list[str]) -> bool:

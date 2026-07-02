@@ -9,13 +9,11 @@ from openai import OpenAI
 from src.config import Settings
 from src.prompts import (
     SYSTEM_PROMPT,
-    build_anchor_decision_user_prompt,
     build_candidate_decision_user_prompt,
     build_user_prompt,
     build_verifier_user_prompt,
 )
 from src.schemas import (
-    ANCHOR_DECISION_JSON_SCHEMA,
     CANDIDATE_DECISION_JSON_SCHEMA,
     ExtractionResult,
     ExtractedTask,
@@ -128,6 +126,7 @@ class OpenAITaskExtractor:
     ) -> tuple[list[ExtractedTask], dict]:
         tasks: list[ExtractedTask] = []
         group_payloads: list[dict] = []
+        processed_candidate_ids: set[str] = set()
 
         for group_idx, group in enumerate(
             _anchor_groups(
@@ -138,25 +137,17 @@ class OpenAITaskExtractor:
             start=1,
         ):
             group_anchor_ids = {a.anchor_id for a in group}
-            group_candidates = [
-                c for c in candidates 
-                if any(aid in group_anchor_ids for aid in c.anchor_ids)
-            ]
-            # De-duplicate candidates across overlapping groups
-            # Only process candidate if its first anchor is in this group
-            # except if it's the very first group, just process it.
-            # A simpler way is to just process them and let later deduplication handle it,
-            # or filter here. We will filter by checking if the candidate's first anchor is in the group.
-            if group_candidates:
-                filtered_candidates = [
-                    c for c in group_candidates 
-                    if c.anchor_ids and c.anchor_ids[0] in group_anchor_ids
-                ]
-                # Edge case: fallback candidate without anchors
-                if not any(a.anchor_id in group_anchor_ids for a in anchors):
-                    filtered_candidates = group_candidates
-            else:
-                filtered_candidates = []
+            filtered_candidates = []
+            for candidate in candidates:
+                if candidate.candidate_id in processed_candidate_ids:
+                    continue
+                if not candidate.anchor_ids:
+                    if group_idx != 1:
+                        continue
+                elif not any(anchor_id in group_anchor_ids for anchor_id in candidate.anchor_ids):
+                    continue
+                filtered_candidates.append(candidate)
+                processed_candidate_ids.add(candidate.candidate_id)
 
             if not filtered_candidates:
                 continue
@@ -171,6 +162,9 @@ class OpenAITaskExtractor:
                 {
                     "group": group_idx,
                     "anchor_ids": [anchor.anchor_id for anchor in group],
+                    "candidate_ids": [
+                        candidate.candidate_id for candidate in filtered_candidates
+                    ],
                     "response": payload,
                 }
             )
@@ -326,7 +320,9 @@ def _parse_candidate_decisions_payload(payload: dict, candidates) -> list[Extrac
             
         candidate_id = str(decision.get("candidate_id", "")).strip()
         cand = cand_map.get(candidate_id)
-        anchor_ids = cand.anchor_ids if cand else ()
+        if cand is None:
+            continue
+        anchor_ids = cand.anchor_ids
         
         tasks.append(
             ExtractedTask(

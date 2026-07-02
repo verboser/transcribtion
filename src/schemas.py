@@ -132,7 +132,10 @@ TASK_ITEM_JSON_SCHEMA = {
         },
         "task": {
             "type": "string",
-            "description": "Краткая формулировка задачи.",
+            "description": (
+                "Краткая нормализованная формулировка задачи в деловом стиле. "
+                "Не дословная цитата, но смысл должен подтверждаться evidence."
+            ),
         },
         "responsible": {
             "type": "string",
@@ -184,42 +187,6 @@ TASK_EXTRACTION_JSON_SCHEMA = {
 }
 
 
-ANCHOR_DECISION_JSON_SCHEMA = {
-    "name": "meeting_anchor_task_decisions",
-    "strict": True,
-    "schema": {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["anchor_decisions"],
-        "properties": {
-            "anchor_decisions": {
-                "type": "array",
-                "description": (
-                    "Ровно одно решение для каждого anchor из входной группы. "
-                    "Если в anchor нет задач, tasks должен быть пустым массивом."
-                ),
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["anchor_id", "tasks"],
-                    "properties": {
-                        "anchor_id": {
-                            "type": "string",
-                            "description": "ID anchor-блока из входа.",
-                        },
-                        "tasks": {
-                            "type": "array",
-                            "description": "Задачи, подтвержденные этим anchor.",
-                            "items": TASK_ITEM_JSON_SCHEMA,
-                        },
-                    },
-                },
-            }
-        },
-    },
-}
-
-
 CANDIDATE_DECISION_JSON_SCHEMA = {
     "name": "meeting_candidate_task_decisions",
     "strict": True,
@@ -256,20 +223,32 @@ CANDIDATE_DECISION_JSON_SCHEMA = {
                         },
                         "block": {
                             "type": "string",
-                            "enum": ["Выполненные", "Невыполненные", "Новые"],
+                            "enum": ["Выполненные", "Невыполненные", "Новые", ""],
+                            "description": (
+                                "Блок задачи. Для is_task=false должна быть "
+                                "пустая строка."
+                            ),
                         },
                         "task": {
                             "type": "string",
-                            "description": "Краткая формулировка задачи.",
+                            "description": (
+                                "Краткая нормализованная формулировка задачи. "
+                                "Например: 'Отправить презентацию', "
+                                "'Утвердить отчет', 'Провести встречу'. "
+                                "Для is_task=false должна быть пустая строка."
+                            ),
                         },
                         "responsible": {
                             "type": "string",
+                            "description": "Ответственный. Для is_task=false пустая строка.",
                         },
                         "deadline_raw": {
                             "type": "string",
+                            "description": "Фраза срока. Для is_task=false пустая строка.",
                         },
                         "evidence": {
                             "type": "string",
+                            "description": "Цитата-обоснование. Для is_task=false пустая строка.",
                         },
                     },
                 },
