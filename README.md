@@ -11,9 +11,52 @@
 - классифицирует задачи в блоки `Выполненные`, `Невыполненные`, `Новые`;
 - пересчитывает относительные сроки в формат `YYYY-MM-DD`;
 - сохраняет цитату-обоснование для проверки каждой задачи;
-- запускает извлечение 5 раз подряд, печатает отчет о стабильности и собирает
-  финальную таблицу по consensus-строкам;
+- по умолчанию делает один production-style LLM-прогон;
+- при `--runs 5` печатает отчет о стабильности и собирает финальную таблицу
+  по consensus-строкам;
+- умеет запускать lexicon audit без LLM, чтобы расширять фильтры на реальных
+  русскоязычных репликах;
 - хранит ключ OpenAI только в `.env`, не в коде.
+
+## Baseline разработки
+
+Текущий baseline фиксирует переход от цикла `5 LLM-прогонов -> ручной разбор
+ошибок -> правка regex` к более управляемому процессу:
+
+1. Основной production-режим делает один LLM-прогон:
+
+```bash
+python main.py --all
+```
+
+2. `--runs 5` используется как eval/stability-режим, а не как обязательный
+способ получить финальную таблицу:
+
+```bash
+python main.py --all --runs 5
+```
+
+3. Новые разговорные маркеры и фильтры сначала проверяются через audit без LLM:
+
+```bash
+python main.py --all --audit-lexicon
+```
+
+4. HuggingFace/SentenceTransformers подключены только как optional semantic
+similarity backend. По умолчанию они выключены, не скачивают веса и не влияют
+на тесты.
+
+5. Базовый инвариант перед следующим этапом: все unit-тесты должны проходить.
+На момент фиксации baseline:
+
+```text
+73 passed
+```
+
+Дальнейшая разработка должна идти вокруг `src/conversation_lexicon.py`,
+`src/lexicon_audit.py` и будущей golden-разметки: сначала измеряем влияние
+слов/паттернов на реальных транскриптах, затем меняем фильтры, после этого
+проверяем LLM-результат.
 
 ## Установка
 
@@ -48,10 +91,16 @@ python main.py
 Конкретный файл:
 
 ```bash
-python main.py --transcript trascripts/transcript.txt --runs 5
+python main.py --transcript trascripts/transcript.txt
 ```
 
 Все три файла из задания:
+
+```bash
+python main.py --all
+```
+
+Проверка стабильности несколькими LLM-прогонами:
 
 ```bash
 python main.py --all --runs 5
@@ -78,6 +127,41 @@ python main.py --all --runs 5 --strategy global
 python main.py --all --runs 5 --save-sqlite
 ```
 
+Проверить разговорные маркеры без LLM и без OpenAI-ключа:
+
+```bash
+python main.py --all --audit-lexicon
+```
+
+Этот режим показывает, какие строки попадают в категории `new_task`, `recap`,
+`ongoing_state`, `weak_done`, `done_rejection`, `new_assignment`. Он нужен,
+чтобы расширять фильтры по реальным словам из русской встречи, а не через
+дорогой цикл пробных LLM-прогонов.
+
+## Опциональная semantic similarity через HuggingFace
+
+По умолчанию проект не скачивает HF-модели и работает полностью
+детерминированно, кроме LLM-вызова. Для усиления fuzzy-dedupe и проверки
+`task/evidence` можно включить SentenceTransformers/E5:
+
+```bash
+pip install -r requirements-semantic.txt
+export TRANSCRIBTION_USE_SEMANTIC=1
+export TRANSCRIBTION_SEMANTIC_MODEL=intfloat/multilingual-e5-base
+python main.py --all
+```
+
+По умолчанию semantic backend ищет модель только локально, чтобы случайно не
+скачивать веса во время тестов или запуска. Если модель нужно скачать через
+HuggingFace, включите это явно:
+
+```bash
+export TRANSCRIBTION_SEMANTIC_ALLOW_DOWNLOAD=1
+```
+
+Если `sentence-transformers` не установлен или модель недоступна локально,
+пайплайн автоматически возвращается к лексическому similarity.
+
 ## Архитектура
 
 Пайплайн разделяет дешевую детерминированную обработку и дорогой семантический
@@ -94,7 +178,7 @@ transcript.txt
 -> валидация anchor_ids, evidence, ответственного и блока
 -> алгоритмическая нормализация дат
 -> дедупликация и сортировка
--> отчет стабильности за 5 прогонов
+-> отчет стабильности за N прогонов
 -> consensus: финальные строки с поддержкой минимум в 2 прогонах
 -> pandas.DataFrame
 ```
@@ -164,11 +248,15 @@ Consensus считается не только по точному тексту 
 ```text
 main.py                  CLI-точка входа
 requirements.txt         зависимости
+requirements-semantic.txt опциональные зависимости для HF similarity
 src/config.py            настройки окружения
+src/conversation_lexicon.py общий словарь разговорных маркеров
 src/date_patterns.py     общие regex-паттерны дат для preprocess и normalizer
 src/preprocess.py        парсинг транскрипта и построение anchors
 src/schemas.py           контракты данных и strict JSON Schema
 src/llm_client.py        клиент OpenAI Responses API и группировка anchors
+src/lexicon_audit.py     аудит словарных маркеров без LLM
+src/semantic_similarity.py optional SentenceTransformers/E5 similarity
 src/date_normalizer.py   алгоритмическая нормализация дат
 src/postprocess.py       валидация, фильтрация, дедупликация, сортировка
 src/stability.py         отчет стабильности и consensus за N прогонов

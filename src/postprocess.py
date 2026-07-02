@@ -6,8 +6,19 @@ import re
 
 import pandas as pd
 
+from src.conversation_lexicon import (
+    DONE_REJECTION_PATTERNS,
+    NEW_ASSIGNMENT_PATTERNS,
+    ONGOING_STATE_PATTERNS,
+    WEAK_DONE_PATTERNS,
+)
 from src.date_normalizer import DateReplacement, normalize_deadline
 from src.schemas import BLOCK_ORDER, DATAFRAME_COLUMNS, ExtractedTask, TaskAnchor
+from src.semantic_similarity import (
+    SEMANTIC_EVIDENCE_THRESHOLD,
+    SEMANTIC_TASK_THRESHOLD,
+    semantic_similarity,
+)
 from src.status_patterns import has_done_signal, has_failed_signal
 
 
@@ -136,22 +147,7 @@ WEAK_DONE_OBJECT_TERMS = {
     "написано",
     "сделано",
 }
-ONGOING_NEW_PATTERNS = [
-    r"\bпроизводится\b",
-    r"\bначали\b",
-    r"\bуже\s+проводим\b",
-    r"\bвремя\s+ещ[её]\s+есть\b",
-    r"\bсейчас\b",
-]
-NEW_ASSIGNMENT_PATTERNS = [
-    r"\bзадач",
-    r"\bпод\s+протокол\b",
-    r"\bнужно\b",
-    r"\bнадо\b",
-    r"\bдолжн",
-    r"\bпоруч",
-    RESPONSIBLE_MARKER_RE.pattern,
-]
+ONGOING_NEW_PATTERNS = ONGOING_STATE_PATTERNS
 
 
 @dataclass(frozen=True)
@@ -534,24 +530,10 @@ def _split_clauses(text: str) -> list[str]:
 
 def _has_done_rejection_signal(task_text: str) -> bool:
     text = task_text.lower().replace("ё", "е")
-    rejection_patterns = [
-        r"\bосталось\b",
-        r"\bожидаем\b",
-        r"\bожидает\b",
-        r"\bожидают\b",
-        r"\bожидани",
-        r"\bпрорабатыва",
-        r"\bбудем\b",
-        r"\bбудут\b",
-        r"\bнадо\b",
-        r"\bнужно\b",
-        r"\bготовность\b",
-        r"\bтолько\s+взять\b",
-        r"\bподкладываем\b",
-        r"\bзанима[ею]тся\b",
-        r"^\s*есть\b",
-    ]
-    return any(re.search(pattern, text) for pattern in rejection_patterns)
+    return any(
+        re.search(pattern, text)
+        for pattern in DONE_REJECTION_PATTERNS + WEAK_DONE_PATTERNS
+    )
 
 
 def _is_generic_done_task(task_text: str) -> bool:
@@ -573,7 +555,7 @@ def _is_generic_done_task(task_text: str) -> bool:
         r"^(?:в\s+целом\s+)?(?:мы\s+)?(?:к\s+\w+\s+)?готов[аоы]?$",
         r"^(?:мы\s+)?готов[аоы]?\s+к\s+.+$",
     ]
-    return any(re.search(pattern, text) for pattern in vague_patterns)
+    return any(re.search(pattern, text) for pattern in vague_patterns + WEAK_DONE_PATTERNS)
 
 
 def _has_concrete_done_object(task_text: str) -> bool:
@@ -624,7 +606,11 @@ def _evidence_supports_task(task: str, evidence: str) -> bool:
         if any(_same_term_family(task_term, evidence_term) for evidence_term in evidence_terms)
     )
     required_matches = min(2, len(task_terms))
-    return matches >= required_matches
+    if matches >= required_matches:
+        return True
+
+    score = semantic_similarity(task, evidence)
+    return score is not None and score >= SEMANTIC_EVIDENCE_THRESHOLD
 
 
 def _content_terms(value: str) -> list[str]:
@@ -703,7 +689,11 @@ def _task_similarity(left: str, right: str) -> float:
         return 0.0
     if left_key in right_key or right_key in left_key:
         return 1.0
-    return SequenceMatcher(None, left_key, right_key).ratio()
+    lexical_score = SequenceMatcher(None, left_key, right_key).ratio()
+    semantic_score = semantic_similarity(left, right)
+    if semantic_score is None:
+        return lexical_score
+    return max(lexical_score, semantic_score if semantic_score >= SEMANTIC_TASK_THRESHOLD else 0.0)
 
 
 def _deduplicate_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:

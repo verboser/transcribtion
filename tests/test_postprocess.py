@@ -757,6 +757,14 @@ def test_new_task_rejects_ongoing_state_without_assignment() -> None:
             ),
             anchor_ids=(),
         ),
+        ExtractedTask(
+            block="Новые",
+            task="отчет в работе",
+            responsible="Ленин",
+            deadline_raw="до пятницы",
+            evidence="Ленин: отчет сейчас в работе до пятницы.",
+            anchor_ids=(),
+        ),
     ]
 
     df, _ = build_dataframe(tasks, "2026-04-15")

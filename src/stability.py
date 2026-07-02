@@ -11,6 +11,7 @@ import pandas as pd
 from src.date_normalizer import DateReplacement, normalize_deadline
 from src.postprocess import build_dataframe_with_stats, row_signature
 from src.schemas import BLOCK_ORDER, DATAFRAME_COLUMNS, ExtractionResult
+from src.semantic_similarity import SEMANTIC_TASK_THRESHOLD, semantic_similarity
 
 
 Extractor = Callable[[Path, str], ExtractionResult]
@@ -319,9 +320,16 @@ def _task_similarity(left: str, right: str) -> float:
         return 0.0
     if left_key in right_key or right_key in left_key:
         return 1.0
-    return max(
+    lexical_score = max(
         SequenceMatcher(None, left_key, right_key).ratio(),
         _term_jaccard(_content_terms(left_key), _content_terms(right_key)),
+    )
+    semantic_score = semantic_similarity(left, right)
+    if semantic_score is None:
+        return lexical_score
+    return max(
+        lexical_score,
+        semantic_score if semantic_score >= SEMANTIC_TASK_THRESHOLD else 0.0,
     )
 
 

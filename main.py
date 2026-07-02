@@ -10,6 +10,7 @@ from src.llm_client import (
     DEFAULT_ANCHOR_GROUP_SIZE,
     OpenAITaskExtractor,
 )
+from src.lexicon_audit import audit_transcript, format_audit_report
 from src.sqlite_store import save_tasks
 from src.stability import run_stability_check
 
@@ -39,8 +40,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--runs",
         type=int,
-        default=5,
-        help="Количество прогонов извлечения для проверки стабильности.",
+        default=1,
+        help=(
+            "Количество прогонов извлечения. Для production обычно достаточно 1; "
+            "для проверки стабильности укажите 5."
+        ),
     )
     parser.add_argument(
         "--strategy",
@@ -68,6 +72,20 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Дополнительно сохранить финальный результат в SQLite.",
     )
+    parser.add_argument(
+        "--audit-lexicon",
+        action="store_true",
+        help=(
+            "Показать совпадения по словарю разговорных маркеров без вызова LLM "
+            "и без проверки OPENAI_API_KEY."
+        ),
+    )
+    parser.add_argument(
+        "--audit-max-examples",
+        type=int,
+        default=12,
+        help="Максимум примеров на категорию для --audit-lexicon.",
+    )
     args = parser.parse_args()
     if args.runs < 1:
         parser.error("--runs должен быть не меньше 1.")
@@ -86,6 +104,18 @@ def resolve_inputs(args: argparse.Namespace) -> list[Path]:
 
 def main() -> None:
     args = parse_args()
+    if args.audit_lexicon:
+        for transcript_path in resolve_inputs(args):
+            matches = audit_transcript(transcript_path)
+            for line in format_audit_report(
+                transcript_path,
+                matches,
+                max_examples_per_category=args.audit_max_examples,
+            ):
+                print(line)
+            print("")
+        return
+
     settings = Settings.from_env()
     extractor = OpenAITaskExtractor(
         settings,

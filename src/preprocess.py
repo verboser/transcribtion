@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from src.conversation_lexicon import patterns_for
 from src.date_patterns import find_date_phrases
 from src.schemas import AnchorKind, TaskAnchor, TranscriptUtterance
 from src.status_patterns import detect_status_signals
@@ -10,36 +11,7 @@ from src.status_patterns import detect_status_signals
 
 SPEAKER_RE = re.compile(r"^\s*(?P<speaker>[^:]{1,120}):\s*(?P<text>.*)\s*$")
 
-TASK_INTENT_PATTERNS = [
-    r"\bпод\s+протокол\b",
-    r"\bпротокол\b",
-    r"\bзадач",
-    r"\bнужно\b",
-    r"\bнадо\b",
-    r"\bдолжн",
-    r"\bответствен",
-    r"\bпросьба\b",
-    r"\bнаправьте\b",
-    r"\bназначить\b",
-    r"\bназначим\b",
-    r"\bдоговорил[аи]сь\b",
-    r"\bдоговоримся\b",
-    r"\bразошлем\b",
-    r"\bразошлём\b",
-    r"\bсформировать\b",
-    r"\bподготовка\b",
-    r"\bподготовить\b",
-    r"\bподготовим\b",
-    r"\bподготовимся\b",
-    r"\bобсудим\b",
-    r"\bпровести\b",
-    r"\bнаправить\b",
-    r"\bдоработать\b",
-    r"\bсогласовать\b",
-    r"\bзапланируем\b",
-    r"\bвозьм[её]м\s+паузу\b",
-    r"\bбудем\b",
-]
+TASK_INTENT_PATTERNS = patterns_for("new_task", "recap")
 
 LOW_COVERAGE_MIN_RATIO = 0.08
 LOW_COVERAGE_MIN_ANCHORS = 15
