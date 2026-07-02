@@ -1,9 +1,9 @@
 from src.llm_client import (
-    _anchor_decision_contract_errors,
+    _candidate_decision_contract_errors,
     _anchor_groups,
-    _parse_anchor_decisions_payload,
+    _parse_candidate_decisions_payload,
 )
-from src.schemas import TaskAnchor, TranscriptUtterance
+from src.schemas import TaskAnchor, TranscriptUtterance, PreLLMCandidate
 
 
 def test_anchor_groups_overlap_neighbors() -> None:
@@ -17,48 +17,56 @@ def test_anchor_groups_overlap_neighbors() -> None:
     ]
 
 
-def test_parse_anchor_decisions_flattens_tasks_and_falls_back_to_decision_anchor() -> None:
+def test_parse_candidate_decisions_payload() -> None:
     payload = {
-        "anchor_decisions": [
+        "candidate_decisions": [
             {
-                "anchor_id": "A001",
-                "tasks": [
-                    {
-                        "block": "Новые",
-                        "task": "подготовить отчет",
-                        "responsible": "Иван",
-                        "deadline_raw": "до пятницы",
-                        "evidence": "Иван: подготовить отчет до пятницы",
-                        "anchor_ids": [],
-                    }
-                ],
+                "candidate_id": "C001",
+                "is_task": True,
+                "block": "Новые",
+                "task": "подготовить отчет",
+                "responsible": "Иван",
+                "deadline_raw": "до пятницы",
+                "evidence": "Иван: подготовить отчет до пятницы",
             },
-            {"anchor_id": "A002", "tasks": []},
+            {"candidate_id": "C002", "is_task": False},
         ]
     }
+    
+    candidates = [
+        PreLLMCandidate(
+            candidate_id="C001",
+            anchor_ids=("A001",),
+            evidence_span="",
+            candidate_kind="new",
+            date_phrases=(),
+            speakers=(),
+            signals=()
+        )
+    ]
 
-    tasks = _parse_anchor_decisions_payload(payload)
+    tasks = _parse_candidate_decisions_payload(payload, candidates)
 
     assert len(tasks) == 1
     assert tasks[0].anchor_ids == ("A001",)
     assert tasks[0].task == "подготовить отчет"
 
 
-def test_anchor_decision_contract_errors_report_missing_extra_and_duplicate_ids() -> None:
+def test_candidate_decision_contract_errors_report_missing_extra_and_duplicate_ids() -> None:
     payload = {
-        "anchor_decisions": [
-            {"anchor_id": "A001", "tasks": []},
-            {"anchor_id": "A001", "tasks": []},
-            {"anchor_id": "A999", "tasks": []},
+        "candidate_decisions": [
+            {"candidate_id": "C001"},
+            {"candidate_id": "C001"},
+            {"candidate_id": "C999"},
         ]
     }
 
-    errors = _anchor_decision_contract_errors(payload, ["A001", "A002"])
+    errors = _candidate_decision_contract_errors(payload, ["C001", "C002"])
 
     assert errors == {
-        "missing_anchor_decisions": ["A002"],
-        "extra_anchor_decisions": ["A999"],
-        "duplicate_anchor_decisions": ["A001"],
+        "missing_candidate_decisions": ["C002"],
+        "extra_candidate_decisions": ["C999"],
+        "duplicate_candidate_decisions": ["C001"],
     }
 
 

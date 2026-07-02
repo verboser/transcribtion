@@ -1,4 +1,4 @@
-from src.preprocess import build_task_anchors, parse_transcript
+from src.preprocess import build_candidates_and_anchors, parse_transcript
 
 
 def test_parse_speaker_lines() -> None:
@@ -24,7 +24,7 @@ def test_build_task_anchors_for_new_task_with_deadline() -> None:
         "Иван: подтверждаю\n"
     )
 
-    anchors = build_task_anchors(utterances)
+    candidates, anchors = build_candidates_and_anchors(utterances)
 
     assert len(anchors) == 1
     assert anchors[0].anchor_id == "A001"
@@ -36,7 +36,7 @@ def test_build_task_anchors_for_new_task_with_deadline() -> None:
 def test_build_task_anchor_for_end_of_week_deadline() -> None:
     utterances = parse_transcript("Иван: подготовить отчет в конце недели")
 
-    anchors = build_task_anchors(utterances)
+    candidates, anchors = build_candidates_and_anchors(utterances)
 
     assert len(anchors) == 1
     assert anchors[0].kind == "new"
@@ -46,7 +46,7 @@ def test_build_task_anchor_for_end_of_week_deadline() -> None:
 def test_anchor_deadline_does_not_duplicate_after_tomorrow() -> None:
     utterances = parse_transcript("Иван: подготовить отчет послезавтра")
 
-    anchors = build_task_anchors(utterances)
+    candidates, anchors = build_candidates_and_anchors(utterances)
 
     assert len(anchors) == 1
     assert anchors[0].deadline_phrases == ("послезавтра",)
@@ -55,7 +55,7 @@ def test_anchor_deadline_does_not_duplicate_after_tomorrow() -> None:
 def test_build_task_anchors_for_done_signal() -> None:
     utterances = parse_transcript("Иван: отчет подготовили и отправили.")
 
-    anchors = build_task_anchors(utterances)
+    candidates, anchors = build_candidates_and_anchors(utterances)
 
     assert len(anchors) == 1
     assert anchors[0].kind == "done"
@@ -64,7 +64,7 @@ def test_build_task_anchors_for_done_signal() -> None:
 def test_done_anchor_does_not_match_close_infinitive() -> None:
     utterances = parse_transcript("Иван: не можем очень долго закрыть заказы")
 
-    anchors = build_task_anchors(utterances)
+    candidates, anchors = build_candidates_and_anchors(utterances)
 
     assert anchors == []
 
@@ -72,7 +72,7 @@ def test_done_anchor_does_not_match_close_infinitive() -> None:
 def test_negated_done_phrase_creates_only_failed_anchor() -> None:
     utterances = parse_transcript("Иван: отчет не сделали")
 
-    anchors = build_task_anchors(utterances)
+    candidates, anchors = build_candidates_and_anchors(utterances)
 
     assert len(anchors) == 1
     assert anchors[0].kind == "failed"
@@ -85,7 +85,7 @@ def test_status_detection_handles_failed_and_done_in_different_clauses() -> None
         "но подготовительные работы произвёл"
     )
 
-    anchors = build_task_anchors(utterances)
+    candidates, anchors = build_candidates_and_anchors(utterances)
 
     assert len(anchors) == 1
     assert anchors[0].kind == "mixed"
@@ -98,7 +98,7 @@ def test_done_anchor_does_not_pull_neighboring_context() -> None:
         "Мария: осталось провести обследование"
     )
 
-    anchors = build_task_anchors(utterances)
+    candidates, anchors = build_candidates_and_anchors(utterances)
 
     assert len(anchors) == 1
     assert anchors[0].line_start == 1
@@ -112,7 +112,7 @@ def test_date_first_anchor_without_task_keyword() -> None:
         "Иван: вернемся к обсуждению"
     )
 
-    anchors = build_task_anchors(utterances)
+    candidates, anchors = build_candidates_and_anchors(utterances)
 
     assert anchors
     assert any("date_first" in anchor.signals for anchor in anchors)
@@ -123,7 +123,7 @@ def test_low_coverage_adds_final_fallback() -> None:
     lines = [f"Иван: обычная реплика {idx}" for idx in range(60)]
     utterances = parse_transcript("\n".join(lines))
 
-    anchors = build_task_anchors(utterances)
+    candidates, anchors = build_candidates_and_anchors(utterances)
 
     assert anchors
     assert any("final_tail_fallback" in anchor.signals for anchor in anchors)
@@ -136,6 +136,6 @@ def test_overlapping_anchors_are_merged() -> None:
         "Иван: ответственный Иван"
     )
 
-    anchors = build_task_anchors(utterances)
+    candidates, anchors = build_candidates_and_anchors(utterances)
 
     assert len(anchors) == 1

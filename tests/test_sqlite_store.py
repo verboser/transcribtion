@@ -99,4 +99,4 @@ def _result(tasks: list[ExtractedTask]) -> ExtractionResult:
                 deadline_phrases=(),
             )
         )
-    return ExtractionResult(tasks=tasks, anchors=anchors, raw_response={})
+    return ExtractionResult(tasks=tasks, anchors=anchors, candidates=[], raw_response={})

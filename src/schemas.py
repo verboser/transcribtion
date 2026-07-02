@@ -60,6 +60,30 @@ class TaskAnchor:
 
 
 @dataclass(frozen=True)
+class PreLLMCandidate:
+    candidate_id: str
+    anchor_ids: tuple[str, ...]
+    evidence_span: str
+    candidate_kind: AnchorKind
+    date_phrases: tuple[str, ...]
+    speakers: tuple[str, ...]
+    signals: tuple[str, ...]
+
+    def as_prompt_block(self) -> str:
+        dates = ", ".join(self.date_phrases) if self.date_phrases else "-"
+        signals = ", ".join(self.signals)
+        speakers = ", ".join(self.speakers)
+        anchor_refs = ", ".join(self.anchor_ids)
+        return (
+            f'<candidate id="{self.candidate_id}" kind="{self.candidate_kind}" '
+            f'speakers="{speakers}" anchors="{anchor_refs}" '
+            f'signals="{signals}" dates="{dates}">\n'
+            f"{self.evidence_span}\n"
+            "</candidate>"
+        )
+
+
+@dataclass(frozen=True)
 class ExtractedTask:
     block: Block
     task: str
@@ -73,6 +97,7 @@ class ExtractedTask:
 class ExtractionResult:
     tasks: list[ExtractedTask]
     anchors: list[TaskAnchor]
+    candidates: list[PreLLMCandidate]
     raw_response: dict
 
 
@@ -195,6 +220,65 @@ ANCHOR_DECISION_JSON_SCHEMA = {
 }
 
 
+CANDIDATE_DECISION_JSON_SCHEMA = {
+    "name": "meeting_candidate_task_decisions",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["candidate_decisions"],
+        "properties": {
+            "candidate_decisions": {
+                "type": "array",
+                "description": (
+                    "Ровно одно решение для каждого candidate из входной группы. "
+                ),
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "candidate_id",
+                        "is_task",
+                        "block",
+                        "task",
+                        "responsible",
+                        "deadline_raw",
+                        "evidence"
+                    ],
+                    "properties": {
+                        "candidate_id": {
+                            "type": "string",
+                            "description": "ID кандидата из входа.",
+                        },
+                        "is_task": {
+                            "type": "boolean",
+                            "description": "Является ли кандидат реальной задачей.",
+                        },
+                        "block": {
+                            "type": "string",
+                            "enum": ["Выполненные", "Невыполненные", "Новые"],
+                        },
+                        "task": {
+                            "type": "string",
+                            "description": "Краткая формулировка задачи.",
+                        },
+                        "responsible": {
+                            "type": "string",
+                        },
+                        "deadline_raw": {
+                            "type": "string",
+                        },
+                        "evidence": {
+                            "type": "string",
+                        },
+                    },
+                },
+            }
+        },
+    },
+}
+
+
 TASK_VERIFICATION_JSON_SCHEMA = {
     "name": "meeting_task_verification",
     "strict": True,
@@ -209,17 +293,36 @@ TASK_VERIFICATION_JSON_SCHEMA = {
                 "items": {
                     "type": "object",
                     "additionalProperties": False,
-                    "required": ["candidate_id", "keep", "reason"],
+                    "required": [
+                        "candidate_id",
+                        "evidence_confirms_task",
+                        "responsible_is_correct",
+                        "deadline_is_correct",
+                        "keep",
+                        "reason"
+                    ],
                     "properties": {
                         "candidate_id": {
                             "type": "string",
                             "description": "ID кандидата из входного списка.",
                         },
+                        "evidence_confirms_task": {
+                            "type": "boolean",
+                            "description": "true если обоснование однозначно доказывает формулировку задачи.",
+                        },
+                        "responsible_is_correct": {
+                            "type": "boolean",
+                            "description": "true если ответственный извлечен строго из обоснования без галлюцинаций.",
+                        },
+                        "deadline_is_correct": {
+                            "type": "boolean",
+                            "description": "true если срок (включая его отсутствие) корректно отражает обоснование.",
+                        },
                         "keep": {
                             "type": "boolean",
                             "description": (
-                                "true, только если evidence прямо подтверждает "
-                                "блок, задачу, ответственного и срок."
+                                "true только если ВСЕ 3 проверки пройдены (evidence_confirms_task, "
+                                "responsible_is_correct, deadline_is_correct)."
                             ),
                         },
                         "reason": {

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from src.conversation_lexicon import patterns_for
 from src.date_patterns import find_date_phrases
-from src.schemas import AnchorKind, TaskAnchor, TranscriptUtterance
+from src.schemas import AnchorKind, PreLLMCandidate, TaskAnchor, TranscriptUtterance
 from src.status_patterns import detect_status_signals
 
 
@@ -62,12 +62,13 @@ def parse_transcript(text: str) -> list[TranscriptUtterance]:
     return utterances
 
 
-def build_task_anchors(
+def build_candidates_and_anchors(
     utterances: list[TranscriptUtterance],
     window_before: int = 0,
     window_after: int = 2,
-) -> list[TaskAnchor]:
+) -> tuple[list[PreLLMCandidate], list[TaskAnchor]]:
     seeds: list[dict] = []
+    raw_candidates: list[PreLLMCandidate] = []
 
     for idx, utterance in enumerate(utterances):
         text = _norm(utterance.text)
@@ -106,27 +107,74 @@ def build_task_anchors(
 
         kind = _resolve_kind(kinds)
         before, after = _seed_window(signals, window_before, window_after)
-        seeds.append(
-            _make_seed(
-                utterances=utterances,
-                idx=idx,
-                kind=kind,
+        seed_dict = _make_seed(
+            utterances=utterances,
+            idx=idx,
+            kind=kind,
+            signals=tuple(sorted(set(signals))),
+            deadline_phrases=deadline_phrases,
+            window_before=before,
+            window_after=after,
+        )
+        seeds.append(seed_dict)
+        raw_candidates.append(
+            PreLLMCandidate(
+                candidate_id=f"C{len(raw_candidates) + 1:03d}",
+                anchor_ids=(),
+                evidence_span=utterance.as_prompt_line(),
+                candidate_kind=kind,
+                date_phrases=deadline_phrases,
+                speakers=(utterance.speaker,),
                 signals=tuple(sorted(set(signals))),
-                deadline_phrases=deadline_phrases,
-                window_before=before,
-                window_after=after,
             )
         )
 
     anchors = _build_anchors_from_seeds(_merge_overlapping_seeds(seeds), utterances)
     if _needs_low_coverage_fallback(anchors, utterances):
-        fallback_seeds = _build_tail_fallback_seeds(utterances)
+        fallback_seeds, fallback_candidate = _build_tail_fallback_seeds_and_candidate(
+            utterances,
+            start_id=len(raw_candidates) + 1,
+        )
         anchors = _build_anchors_from_seeds(
             _merge_overlapping_seeds(seeds + fallback_seeds),
             utterances,
         )
+        if fallback_candidate:
+            raw_candidates.append(fallback_candidate)
 
-    return anchors
+    # Map candidates to anchors
+    final_candidates: list[PreLLMCandidate] = []
+    for cand in raw_candidates:
+        # Extract line number from prompt line "[0012] Speaker: Text"
+        line_no = -1
+        match = re.match(r"^\[(\d{4})\]", cand.evidence_span)
+        if match:
+            line_no = int(match.group(1))
+        
+        c_anchors = []
+        for a in anchors:
+            if line_no != -1:
+                if a.line_start <= line_no <= a.line_end:
+                    c_anchors.append(a.anchor_id)
+            else:
+                # Fallback candidate, map to all anchors that overlap with tail
+                # but let's just map it to the last anchor
+                if a == anchors[-1]:
+                    c_anchors.append(a.anchor_id)
+        
+        final_candidates.append(
+            PreLLMCandidate(
+                candidate_id=cand.candidate_id,
+                anchor_ids=tuple(c_anchors),
+                evidence_span=cand.evidence_span,
+                candidate_kind=cand.candidate_kind,
+                date_phrases=cand.date_phrases,
+                speakers=cand.speakers,
+                signals=cand.signals,
+            )
+        )
+
+    return final_candidates, anchors
 
 
 def _seed_window(
@@ -145,6 +193,10 @@ def _seed_window(
 
 def format_anchors_for_prompt(anchors: list[TaskAnchor]) -> str:
     return "\n\n".join(anchor.as_prompt_block() for anchor in anchors)
+
+
+def format_candidates_for_prompt(candidates: list[PreLLMCandidate]) -> str:
+    return "\n\n".join(candidate.as_prompt_block() for candidate in candidates)
 
 
 def find_deadline_phrases(text: str) -> list[str]:
@@ -240,22 +292,34 @@ def _needs_low_coverage_fallback(
     return len(anchors) < LOW_COVERAGE_MIN_ANCHORS or coverage < LOW_COVERAGE_MIN_RATIO
 
 
-def _build_tail_fallback_seeds(utterances: list[TranscriptUtterance]) -> list[dict]:
+def _build_tail_fallback_seeds_and_candidate(
+    utterances: list[TranscriptUtterance],
+    start_id: int,
+) -> tuple[list[dict], PreLLMCandidate | None]:
     if not utterances:
-        return []
+        return [], None
 
     start = max(0, len(utterances) - FALLBACK_TAIL_UTTERANCES)
     chunk_text = " ".join(utterance.text for utterance in utterances[start:])
-    return [
-        {
-            "start": start,
-            "end": len(utterances) - 1,
-            "kind": "mixed",
-            "speakers": ("Несколько спикеров",),
-            "signals": ("final_tail_fallback",),
-            "deadline_phrases": tuple(find_deadline_phrases(chunk_text)),
-        }
-    ]
+    dates = tuple(find_deadline_phrases(chunk_text))
+    seed = {
+        "start": start,
+        "end": len(utterances) - 1,
+        "kind": "mixed",
+        "speakers": ("Несколько спикеров",),
+        "signals": ("final_tail_fallback",),
+        "deadline_phrases": dates,
+    }
+    candidate = PreLLMCandidate(
+        candidate_id=f"C{start_id:03d}",
+        anchor_ids=(),
+        evidence_span=" ".join(u.as_prompt_line() for u in utterances[start:]),
+        candidate_kind="mixed",
+        date_phrases=dates,
+        speakers=("Несколько спикеров",),
+        signals=("final_tail_fallback",),
+    )
+    return [seed], candidate
 
 
 def _resolve_kind(kinds: set[AnchorKind]) -> AnchorKind:

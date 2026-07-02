@@ -509,7 +509,10 @@ def _same_consensus_group(left: dict[str, str], right: dict[str, str]) -> bool:
         and _normalize_key(left["Ответственный"]) == _normalize_key(right["Ответственный"])
         and left["Срок"] == right["Срок"]
         and _evidence_compatible(left["Обоснование"], right["Обоснование"])
-        and _task_similarity(left["Задача"], right["Задача"]) >= 0.82
+        and (
+            canonize_task(left["Задача"]) == canonize_task(right["Задача"])
+            or _task_similarity(left["Задача"], right["Задача"]) >= 0.82
+        )
     )
 
 
@@ -594,6 +597,12 @@ def _content_terms(value: str) -> list[str]:
 
 def _term_family(term: str) -> str:
     return term[:7] if len(term) >= 7 else term
+
+
+def canonize_task(task_text: str) -> str:
+    terms = _content_terms(task_text)
+    stemmed = sorted([_term_family(term) for term in terms])
+    return " ".join(stemmed)
 
 
 def _safe_div(numerator: int, denominator: int) -> float:

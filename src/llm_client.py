@@ -10,11 +10,13 @@ from src.config import Settings
 from src.prompts import (
     SYSTEM_PROMPT,
     build_anchor_decision_user_prompt,
+    build_candidate_decision_user_prompt,
     build_user_prompt,
     build_verifier_user_prompt,
 )
 from src.schemas import (
     ANCHOR_DECISION_JSON_SCHEMA,
+    CANDIDATE_DECISION_JSON_SCHEMA,
     ExtractionResult,
     ExtractedTask,
     TASK_EXTRACTION_JSON_SCHEMA,
@@ -22,8 +24,9 @@ from src.schemas import (
     VerificationCandidate,
 )
 from src.preprocess import (
-    build_task_anchors,
+    build_candidates_and_anchors,
     format_anchors_for_prompt,
+    format_candidates_for_prompt,
     load_transcript,
     parse_transcript,
 )
@@ -56,16 +59,17 @@ class OpenAITaskExtractor:
     def extract(self, transcript_path: Path, meeting_date: str) -> ExtractionResult:
         raw_text = load_transcript(transcript_path)
         utterances = parse_transcript(raw_text)
-        anchors = build_task_anchors(utterances)
+        candidates, anchors = build_candidates_and_anchors(utterances)
         if self.strategy == "global":
             tasks, raw_response = self._extract_from_anchor_batch(
                 meeting_date=meeting_date,
                 anchors=anchors,
             )
         elif self.strategy == "anchored":
-            tasks, raw_response = self._extract_from_anchor_decision_groups(
+            tasks, raw_response = self._extract_from_candidate_decision_groups(
                 meeting_date=meeting_date,
                 anchors=anchors,
+                candidates=candidates,
             )
         else:
             tasks, raw_response = self._extract_from_anchor_groups(
@@ -73,7 +77,7 @@ class OpenAITaskExtractor:
                 anchors=anchors,
             )
 
-        return ExtractionResult(tasks=tasks, anchors=anchors, raw_response=raw_response)
+        return ExtractionResult(tasks=tasks, anchors=anchors, candidates=candidates, raw_response=raw_response)
 
     def verify_candidates(
         self,
@@ -116,10 +120,11 @@ class OpenAITaskExtractor:
             and str(item.get("candidate_id", "")).strip() in candidate_ids
         }
 
-    def _extract_from_anchor_decision_groups(
+    def _extract_from_candidate_decision_groups(
         self,
         meeting_date: str,
         anchors,
+        candidates,
     ) -> tuple[list[ExtractedTask], dict]:
         tasks: list[ExtractedTask] = []
         group_payloads: list[dict] = []
@@ -132,9 +137,34 @@ class OpenAITaskExtractor:
             ),
             start=1,
         ):
-            group_tasks, payload = self._extract_from_anchor_decision_batch(
+            group_anchor_ids = {a.anchor_id for a in group}
+            group_candidates = [
+                c for c in candidates 
+                if any(aid in group_anchor_ids for aid in c.anchor_ids)
+            ]
+            # De-duplicate candidates across overlapping groups
+            # Only process candidate if its first anchor is in this group
+            # except if it's the very first group, just process it.
+            # A simpler way is to just process them and let later deduplication handle it,
+            # or filter here. We will filter by checking if the candidate's first anchor is in the group.
+            if group_candidates:
+                filtered_candidates = [
+                    c for c in group_candidates 
+                    if c.anchor_ids and c.anchor_ids[0] in group_anchor_ids
+                ]
+                # Edge case: fallback candidate without anchors
+                if not any(a.anchor_id in group_anchor_ids for a in anchors):
+                    filtered_candidates = group_candidates
+            else:
+                filtered_candidates = []
+
+            if not filtered_candidates:
+                continue
+
+            group_tasks, payload = self._extract_from_candidate_decision_batch(
                 meeting_date,
                 group,
+                filtered_candidates,
             )
             tasks.extend(group_tasks)
             group_payloads.append(
@@ -225,15 +255,17 @@ class OpenAITaskExtractor:
         payload = json.loads(_response_text(response))
         return _parse_tasks_payload(payload), payload
 
-    def _extract_from_anchor_decision_batch(
+    def _extract_from_candidate_decision_batch(
         self,
         meeting_date: str,
         anchors,
+        candidates,
     ) -> tuple[list[ExtractedTask], dict]:
-        if not anchors:
-            return [], {"anchor_decisions": []}
+        if not candidates:
+            return [], {"candidate_decisions": []}
 
         prompt_anchors = format_anchors_for_prompt(anchors)
+        prompt_candidates = format_candidates_for_prompt(candidates)
 
         response = self.client.responses.create(
             model=self.settings.model,
@@ -241,18 +273,19 @@ class OpenAITaskExtractor:
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {
                     "role": "user",
-                    "content": build_anchor_decision_user_prompt(
+                    "content": build_candidate_decision_user_prompt(
                         meeting_date,
                         prompt_anchors,
+                        prompt_candidates,
                     ),
                 },
             ],
             text={
                 "format": {
                     "type": "json_schema",
-                    "name": ANCHOR_DECISION_JSON_SCHEMA["name"],
-                    "strict": ANCHOR_DECISION_JSON_SCHEMA["strict"],
-                    "schema": ANCHOR_DECISION_JSON_SCHEMA["schema"],
+                    "name": CANDIDATE_DECISION_JSON_SCHEMA["name"],
+                    "strict": CANDIDATE_DECISION_JSON_SCHEMA["strict"],
+                    "schema": CANDIDATE_DECISION_JSON_SCHEMA["schema"],
                 }
             },
             temperature=0,
@@ -260,14 +293,14 @@ class OpenAITaskExtractor:
         )
 
         payload = json.loads(_response_text(response))
-        expected_anchor_ids = [anchor.anchor_id for anchor in anchors]
-        contract_errors = _anchor_decision_contract_errors(
+        expected_candidate_ids = [c.candidate_id for c in candidates]
+        contract_errors = _candidate_decision_contract_errors(
             payload,
-            expected_anchor_ids,
+            expected_candidate_ids,
         )
         if contract_errors:
             payload["contract_errors"] = contract_errors
-        return _parse_anchor_decisions_payload(payload), payload
+        return _parse_candidate_decisions_payload(payload, candidates), payload
 
 
 def _parse_tasks_payload(payload: dict) -> list[ExtractedTask]:
@@ -284,48 +317,49 @@ def _parse_tasks_payload(payload: dict) -> list[ExtractedTask]:
     ]
 
 
-def _parse_anchor_decisions_payload(payload: dict) -> list[ExtractedTask]:
+def _parse_candidate_decisions_payload(payload: dict, candidates) -> list[ExtractedTask]:
     tasks: list[ExtractedTask] = []
-    for decision in payload.get("anchor_decisions", []):
-        decision_anchor_id = str(decision["anchor_id"]).strip()
-        for item in decision.get("tasks", []):
-            anchor_ids = tuple(
-                str(anchor_id).strip()
-                for anchor_id in item.get("anchor_ids", [])
-                if str(anchor_id).strip()
+    cand_map = {c.candidate_id: c for c in candidates}
+    for decision in payload.get("candidate_decisions", []):
+        if not decision.get("is_task"):
+            continue
+            
+        candidate_id = str(decision.get("candidate_id", "")).strip()
+        cand = cand_map.get(candidate_id)
+        anchor_ids = cand.anchor_ids if cand else ()
+        
+        tasks.append(
+            ExtractedTask(
+                block=decision.get("block", "Новые"),
+                task=decision.get("task", "").strip(),
+                responsible=decision.get("responsible", "").strip(),
+                deadline_raw=decision.get("deadline_raw", "").strip(),
+                evidence=decision.get("evidence", "").strip(),
+                anchor_ids=anchor_ids,
             )
-            tasks.append(
-                ExtractedTask(
-                    block=item["block"],
-                    task=item["task"].strip(),
-                    responsible=item["responsible"].strip(),
-                    deadline_raw=item["deadline_raw"].strip(),
-                    evidence=item["evidence"].strip(),
-                    anchor_ids=anchor_ids or (decision_anchor_id,),
-                )
-            )
+        )
     return tasks
 
 
-def _anchor_decision_contract_errors(
+def _candidate_decision_contract_errors(
     payload: dict,
-    expected_anchor_ids: list[str],
+    expected_candidate_ids: list[str],
 ) -> dict[str, list[str]]:
-    expected = set(expected_anchor_ids)
+    expected = set(expected_candidate_ids)
     seen = [
-        str(decision.get("anchor_id", "")).strip()
-        for decision in payload.get("anchor_decisions", [])
+        str(decision.get("candidate_id", "")).strip()
+        for decision in payload.get("candidate_decisions", [])
     ]
     seen_set = set(seen)
     duplicates = sorted(
-        anchor_id
-        for anchor_id in seen_set
-        if anchor_id and seen.count(anchor_id) > 1
+        candidate_id
+        for candidate_id in seen_set
+        if candidate_id and seen.count(candidate_id) > 1
     )
     errors = {
-        "missing_anchor_decisions": sorted(expected - seen_set),
-        "extra_anchor_decisions": sorted(seen_set - expected),
-        "duplicate_anchor_decisions": duplicates,
+        "missing_candidate_decisions": sorted(expected - seen_set),
+        "extra_candidate_decisions": sorted(seen_set - expected),
+        "duplicate_candidate_decisions": duplicates,
     }
     return {key: value for key, value in errors.items() if value}
 
